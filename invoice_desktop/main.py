@@ -46,10 +46,16 @@ WARNING_ROW_COLOR = QColor("#FFF7E6")
 WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 VERSION_UPDATES = [
     (
-        "v1.0.0（当前版本）",
+        "v1.0.1（当前版本）",
+        [
+            "新增“关于”入口，可查看当前版本号与版本更新信息。",
+        ],
+    ),
+    (
+        "v1.0.0",
         [
             "支持 PDF 发票文本提取与本地 OCR 识别。",
             "支持目录扫描、网约车发票与行程单配对、汇总及重命名。",
