@@ -1,0 +1,74 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Python OCR Prototype",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"python_recognizer.cli",
+				"${input:invoicePdfPath}",
+				"--pretty"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Pair Ride-Hailing PDFs",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"python_recognizer.cli",
+				"--pair-dir",
+				"${input:rideHailingPdfDir}",
+				"--pretty"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Organize Invoice Directory",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"python_recognizer.cli",
+				"--organize-dir",
+				"${input:organizeInvoiceDir}",
+				"--pretty"
+			],
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "Run Desktop Invoice App",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"-m",
+				"invoice_desktop.main"
+			],
+			"isBackground": false,
+			"group": "test"
+		}
+	],
+	"inputs": [
+		{
+			"id": "invoicePdfPath",
+			"type": "promptString",
+			"description": "输入要识别的 PDF 绝对路径"
+		},
+		{
+			"id": "rideHailingPdfDir",
+			"type": "promptString",
+			"description": "输入网约车发票与行程单所在目录的绝对路径"
+		},
+		{
+			"id": "organizeInvoiceDir",
+			"type": "promptString",
+			"description": "输入待整理发票目录的绝对路径"
+		}
+	]
+}

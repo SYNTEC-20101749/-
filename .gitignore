@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.venv/
+__pycache__/
+*.pyc
+build/
+release/
+invoice_desktop/build/
