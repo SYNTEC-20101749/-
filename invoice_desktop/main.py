@@ -46,6 +46,17 @@ WARNING_ROW_COLOR = QColor("#FFF7E6")
 WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
+APP_VERSION = "1.0.0"
+VERSION_UPDATES = [
+    (
+        "v1.0.0（当前版本）",
+        [
+            "支持 PDF 发票文本提取与本地 OCR 识别。",
+            "支持目录扫描、网约车发票与行程单配对、汇总及重命名。",
+            "支持桌面端整理、汇总清单生成、打印与 Excel 归档。",
+        ],
+    ),
+]
 
 APP_STYLE = """
 QMainWindow {
@@ -422,6 +433,10 @@ class MainWindow(QMainWindow):
         self.open_archive_button.setProperty("role", "success")
         self.open_archive_button.clicked.connect(self.open_archive_excel)
 
+        self.about_button = QPushButton("关于")
+        self.about_button.setProperty("role", "accent")
+        self.about_button.clicked.connect(self.show_about)
+
         button_row.addWidget(self.choose_button)
         button_row.addWidget(self.directory_status_label)
         button_row.addWidget(self.analyze_button)
@@ -431,6 +446,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.open_output_button)
         button_row.addWidget(self.manual_summary_button)
         button_row.addWidget(self.print_summary_button)
+        button_row.addWidget(self.about_button)
         button_row.addStretch(1)
 
         self.phase_label = QLabel("当前状态：等待分析")
@@ -541,6 +557,20 @@ class MainWindow(QMainWindow):
             return
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_path)))
+
+    def show_about(self) -> None:
+        update_text = "\n\n".join(
+            f"{version}\n" + "\n".join(f"• {item}" for item in changes)
+            for version, changes in VERSION_UPDATES
+        )
+        QMessageBox.about(
+            self,
+            "关于发票管理系统",
+            f"<h2>发票管理系统</h2>"
+            f"<p>当前版本：<b>v{APP_VERSION}</b></p>"
+            f"<p><b>版本更新信息</b></p>"
+            f"<p>{update_text.replace(chr(10), '<br>')}</p>",
+        )
 
     def toggle_date_summary(self) -> None:
         should_show = not self.date_summary_group.isVisible()
