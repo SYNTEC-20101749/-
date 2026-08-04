@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from openpyxl import Workbook, load_workbook
 
@@ -30,7 +31,9 @@ ARCHIVE_HEADERS = [
 ]
 
 
-def get_default_archive_path() -> Path:
+def get_default_archive_path(source_directory: Optional[str | Path] = None) -> Path:
+    if source_directory:
+        return Path(source_directory) / "发票打印汇总档案.xlsx"
     return Path.home() / "Desktop" / "发票打印汇总档案.xlsx"
 
 
@@ -88,7 +91,10 @@ def append_print_archive(
     in_transit_amount: float,
     travel_in_transit: str,
 ) -> Path:
-    target_path = archive_path or get_default_archive_path()
+    """生成当前汇总归档；同名文件存在时覆盖，不追加历史记录。"""
+    target_path = archive_path or get_default_archive_path(result.source_directory)
+    if target_path.exists():
+        target_path.unlink()
     workbook, worksheet = _ensure_workbook(target_path)
     start_date, end_date = _get_trip_date_range(result)
 

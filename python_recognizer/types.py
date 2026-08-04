@@ -74,6 +74,7 @@ class InvoiceOrganizeRecord:
     pair_status: str
     review_status: str
     warnings: list[str]
+    hints: list[str]
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

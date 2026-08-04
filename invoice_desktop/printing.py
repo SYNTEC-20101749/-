@@ -109,15 +109,29 @@ def print_summary_sheet(
 def print_pdf_queue(
     queue: list[Path],
     progress_callback: Callable[[int, int, Path], None] | None = None,
+    printer_name: str | None = None,
 ) -> int:
-    default_printer = QPrinterInfo.defaultPrinter()
-    if default_printer.isNull():
+    printer_info = QPrinterInfo.defaultPrinter()
+    if printer_name:
+        printer_info = next(
+            (
+                available_printer
+                for available_printer in QPrinterInfo.availablePrinters()
+                if available_printer.printerName() == printer_name
+            ),
+            QPrinterInfo(),
+        )
+
+    if printer_info.isNull():
+        selected_name = printer_name or "默认打印机"
+        if printer_name:
+            raise RuntimeError(f"选择的打印机不可用：{selected_name}。请重新选择打印机。")
         raise RuntimeError("未检测到默认打印机，请先在 Windows 中设置默认打印机。")
 
     if not queue:
         raise RuntimeError("没有可打印的文件。请先执行整理，确保输出目录里已有 PDF。")
 
-    printer = QPrinter(default_printer, QPrinter.HighResolution)
+    printer = QPrinter(printer_info, QPrinter.HighResolution)
     printer.setPageSize(QPrinter.A5)
     printer.setFullPage(False)
     printer.setColorMode(QPrinter.Color)
@@ -125,7 +139,7 @@ def print_pdf_queue(
 
     painter = QPainter()
     if not painter.begin(printer):
-        raise RuntimeError(f"无法启动打印任务：{default_printer.printerName()}")
+        raise RuntimeError(f"无法启动打印任务：{printer_info.printerName()}")
 
     try:
         first_page = True

@@ -9,12 +9,13 @@ from typing import Optional
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QKeySequence
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QAction,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -29,6 +30,8 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QInputDialog,
+    QStackedWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -50,6 +53,7 @@ from python_recognizer.workflow import (
 WARNING_ROW_COLOR = QColor("#FFF7E6")
 WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
+SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
 APP_VERSION = "1.0.2"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
@@ -83,7 +87,7 @@ QMainWindow {
 }
 QWidget {
     color: #24384d;
-    font-size: 13px;
+    font-size: 20px;
 }
 QGroupBox {
     border: 1px solid #d8cdbd;
@@ -107,7 +111,7 @@ QLabel[role="title"] {
 }
 QLabel[role="subtitle"] {
     color: #6b6257;
-    font-size: 13px;
+    font-size: 18px;
 }
 QLabel[role="reimbursementReminder"] {
     min-height: 32px;
@@ -188,6 +192,29 @@ QPushButton[feedback="true"] {
 }
 QPushButton[feedback="true"]:hover {
     background: #d28348;
+}
+QListWidget[role="settingsNav"] {
+    min-width: 150px;
+    max-width: 190px;
+    border: 1px solid #d8cdbd;
+    border-radius: 12px;
+    background: #fffaf3;
+    padding: 6px;
+    outline: 0;
+}
+QListWidget[role="settingsNav"]::item {
+    min-height: 36px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    color: #5f4832;
+    font-weight: 600;
+}
+QListWidget[role="settingsNav"]::item:hover {
+    background: #f7f0e5;
+}
+QListWidget[role="settingsNav"]::item:selected {
+    color: #ffffff;
+    background: #2f6f98;
 }
 QLineEdit {
     min-height: 38px;
@@ -270,6 +297,7 @@ class PrintWorker(QThread):
         subsidy_amount: float,
         in_transit_amount: float,
         travel_in_transit: str,
+        printer_name: str,
     ) -> None:
         super().__init__()
         self.result = result
@@ -279,34 +307,23 @@ class PrintWorker(QThread):
         self.subsidy_amount = subsidy_amount
         self.in_transit_amount = in_transit_amount
         self.travel_in_transit = travel_in_transit
+        self.printer_name = printer_name
 
     def _emit_progress(self, current: int, total: int, pdf_path: Path) -> None:
         self.progress.emit(current, total, pdf_path.name)
 
     def run(self) -> None:
         try:
-            printed_jobs = print_pdf_queue(self.queue, progress_callback=self._emit_progress)
+            printed_jobs = print_pdf_queue(
+                self.queue,
+                progress_callback=self._emit_progress,
+                printer_name=self.printer_name,
+            )
         except Exception as error:
             self.failed.emit(str(error))
             return
 
-        archive_path = get_default_archive_path()
-        archive_warning = ""
-        self.status.emit("正在写入归档 Excel...")
-        try:
-            archive_path = append_print_archive(
-                self.result,
-                printed_jobs=printed_jobs,
-                unique_files=self.unique_files,
-                taxi_amount=self.taxi_amount,
-                subsidy_amount=self.subsidy_amount,
-                in_transit_amount=self.in_transit_amount,
-                travel_in_transit=self.travel_in_transit,
-            )
-        except Exception as error:
-            archive_warning = f"\n归档写入失败：{error}\n默认档案位置：{archive_path}"
-
-        self.completed.emit(printed_jobs, str(archive_path), archive_warning)
+        self.completed.emit(printed_jobs, "", "")
 
 
 class PublicDiskUploadDialog(QDialog):
@@ -324,7 +341,11 @@ class PublicDiskUploadDialog(QDialog):
         layout.addWidget(output_label)
 
         self.file_list = QListWidget()
-        for file_path in sorted(path for path in output_directory.iterdir() if path.is_file()):
+        for file_path in sorted(
+            path
+            for path in output_directory.iterdir()
+            if path.is_file() and not self._is_summary_pdf(path)
+        ):
             self.file_list.addItem(file_path.name)
         layout.addWidget(self.file_list, 1)
 
@@ -334,8 +355,8 @@ class PublicDiskUploadDialog(QDialog):
         layout.addWidget(self.address_input)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.buttons.button(QDialogButtonBox.Ok).setText("确认")
-        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        self.buttons.button(QDialogButtonBox.Ok).setText("YES")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("NO")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
@@ -343,11 +364,15 @@ class PublicDiskUploadDialog(QDialog):
     def public_disk_address(self) -> str:
         return self.address_input.text().strip()
 
+    @staticmethod
+    def _is_summary_pdf(file_path: Path) -> bool:
+        return file_path.suffix.lower() == ".pdf" and file_path.stem == "汇总清单"
+
     def listed_pdf_files(self) -> list[Path]:
         files = []
         for row_index in range(self.file_list.count()):
             file_path = self.output_directory / self.file_list.item(row_index).text()
-            if file_path.suffix.lower() == ".pdf":
+            if file_path.suffix.lower() == ".pdf" and not self._is_summary_pdf(file_path):
                 files.append(file_path)
         return files
 
@@ -365,6 +390,8 @@ class MainWindow(QMainWindow):
         self.manual_summary_source_directory = str(Path.home() / "Desktop" / "手动汇总")
         self.manual_output_directory = str(Path.home() / "Desktop" / "手动汇总清单输出")
         self.selected_directory = self.default_directory
+        self.settings = QSettings("SYNTEC", "InvoiceManager")
+        self.selected_printer_name = self._load_selected_printer_name()
         self.date_manual_values: dict[str, tuple[str, float, float]] = {}
         self.updating_date_table = False
         self.reminder_blink_state = True
@@ -378,6 +405,8 @@ class MainWindow(QMainWindow):
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        self.settings_dialog = self._build_settings_dialog()
+        self._build_menu_bar()
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(18, 18, 18, 18)
         root_layout.setSpacing(12)
@@ -394,6 +423,101 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("选择目录后，先执行分析汇总。")
         self._reset_result_views()
         self._update_action_buttons()
+
+    def _build_menu_bar(self) -> None:
+        """创建标准软件菜单栏，菜单项用于打开对应的设定或说明窗口。"""
+        menu_bar = self.menuBar()
+        menu_bar.setNativeMenuBar(False)
+
+        self.settings_menu = menu_bar.addMenu("设定")
+        self.printer_settings_action = QAction("打印机设定", self)
+        self.printer_settings_action.triggered.connect(self.show_printer_settings)
+        self.settings_menu.addAction(self.printer_settings_action)
+
+        self.help_menu = menu_bar.addMenu("帮助")
+        self.about_action = QAction("关于 / 更新说明", self)
+        self.about_action.triggered.connect(self.show_about)
+        self.help_menu.addAction(self.about_action)
+
+    def _build_settings_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("设定")
+        dialog.setModal(True)
+        dialog.resize(720, 420)
+
+        root_layout = QVBoxLayout(dialog)
+        root_layout.setSpacing(12)
+
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(14)
+
+        self.settings_nav_list = QListWidget()
+        self.settings_nav_list.setProperty("role", "settingsNav")
+        self.settings_nav_list.addItem("打印机设定")
+
+        self.settings_pages = QStackedWidget()
+        placeholder_page = QWidget()
+        placeholder_layout = QVBoxLayout(placeholder_page)
+        placeholder_layout.setContentsMargins(18, 18, 18, 18)
+        placeholder_label = QLabel("请选择左侧设定项目。")
+        placeholder_label.setProperty("role", "subtitle")
+        placeholder_layout.addWidget(placeholder_label)
+        placeholder_layout.addStretch(1)
+        self.settings_pages.addWidget(placeholder_page)
+
+        printer_page = QWidget()
+        printer_page_layout = QVBoxLayout(printer_page)
+        printer_page_layout.setContentsMargins(0, 0, 0, 0)
+        printer_group = QGroupBox("打印机设定")
+        printer_layout = QVBoxLayout(printer_group)
+        printer_layout.setSpacing(10)
+
+        description = QLabel("选择打印机后，系统会记住本次选择，下次启动继续使用。")
+        description.setWordWrap(True)
+        printer_layout.addWidget(description)
+
+        printer_row = QHBoxLayout()
+        self.printer_button = QPushButton("选择打印机")
+        self.printer_button.setProperty("role", "accent")
+        self.printer_button.clicked.connect(self.choose_printer)
+        self.printer_status_label = QLabel()
+        self.printer_status_label.setProperty("role", "subtitle")
+        self._update_printer_status_label()
+        printer_row.addWidget(self.printer_button)
+        printer_row.addWidget(self.printer_status_label, 1)
+        printer_layout.addLayout(printer_row)
+        printer_page_layout.addWidget(printer_group)
+        printer_page_layout.addStretch(1)
+        self.settings_pages.addWidget(printer_page)
+
+        self.settings_nav_list.currentRowChanged.connect(self._on_settings_option_changed)
+        content_layout.addWidget(self.settings_nav_list)
+        content_layout.addWidget(self.settings_pages, 1)
+        root_layout.addLayout(content_layout, 1)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        root_layout.addWidget(close_button, 0, Qt.AlignRight)
+        return dialog
+
+    def _on_settings_option_changed(self, row_index: int) -> None:
+        if row_index < 0:
+            self.settings_pages.setCurrentIndex(0)
+            return
+        self.settings_pages.setCurrentIndex(row_index + 1)
+
+    def show_settings(self) -> None:
+        self.settings_nav_list.clearSelection()
+        self.settings_nav_list.setCurrentRow(-1)
+        self.settings_pages.setCurrentIndex(0)
+        self.settings_dialog.exec_()
+
+    def _select_printer_settings_page(self) -> None:
+        self.settings_nav_list.setCurrentRow(0)
+
+    def show_printer_settings(self) -> None:
+        self._select_printer_settings_page()
+        self.settings_dialog.exec_()
 
     def _build_header(self) -> QWidget:
         container = QWidget()
@@ -495,33 +619,80 @@ class MainWindow(QMainWindow):
         self.upload_public_disk_button.setProperty("role", "success")
         self.upload_public_disk_button.clicked.connect(self.upload_pdfs_to_public_disk)
 
-        self.open_archive_button = QPushButton("打开归档 Excel")
+        self.open_archive_button = QPushButton("生成汇总清单并打开")
         self.open_archive_button.setProperty("role", "success")
-        self.open_archive_button.clicked.connect(self.open_archive_excel)
+        self.open_archive_button.clicked.connect(self.generate_archive_excel)
 
-        self.about_button = QPushButton("关于")
-        self.about_button.setProperty("role", "accent")
-        self.about_button.clicked.connect(self.show_about)
+        self.phase_label = QLabel("当前状态：等待分析")
+        self.phase_label.setProperty("role", "subtitle")
 
         button_row.addWidget(self.choose_button)
         button_row.addWidget(self.directory_status_label)
         button_row.addWidget(self.analyze_button)
         button_row.addWidget(self.toggle_date_summary_button)
-        button_row.addWidget(self.print_button)
         button_row.addWidget(self.open_archive_button)
         button_row.addWidget(self.open_output_button)
         button_row.addWidget(self.upload_public_disk_button)
+        button_row.addWidget(self.print_button)
         button_row.addWidget(self.manual_summary_button)
         button_row.addWidget(self.print_summary_button)
-        button_row.addWidget(self.about_button)
         button_row.addStretch(1)
-
-        self.phase_label = QLabel("当前状态：等待分析")
-        self.phase_label.setProperty("role", "subtitle")
 
         layout.addLayout(button_row)
         layout.addWidget(self.phase_label)
         return group
+
+    @staticmethod
+    def _available_printer_names() -> list[str]:
+        return sorted(
+            {
+                printer.printerName()
+                for printer in QPrinterInfo.availablePrinters()
+                if printer.printerName()
+            },
+            key=str.casefold,
+        )
+
+    def _load_selected_printer_name(self) -> str:
+        available_names = self._available_printer_names()
+        saved_name = str(self.settings.value("printer/name", "") or "")
+        if saved_name in available_names:
+            return saved_name
+
+        default_printer = QPrinterInfo.defaultPrinter()
+        if not default_printer.isNull() and default_printer.printerName() in available_names:
+            return default_printer.printerName()
+        return available_names[0] if available_names else ""
+
+    def _update_printer_status_label(self) -> None:
+        if self.selected_printer_name:
+            self.printer_status_label.setText(f"当前：{self.selected_printer_name}")
+        else:
+            self.printer_status_label.setText("未检测到打印机")
+
+    def choose_printer(self) -> None:
+        printer_names = self._available_printer_names()
+        if not printer_names:
+            QMessageBox.warning(self, "未检测到打印机", "Windows 当前没有可用打印机。")
+            return
+
+        current_index = max(printer_names.index(self.selected_printer_name), 0) if self.selected_printer_name in printer_names else 0
+        selected_name, accepted = QInputDialog.getItem(
+            self,
+            "选择打印机",
+            "打印机：",
+            printer_names,
+            current_index,
+            False,
+        )
+        if not accepted or not selected_name:
+            return
+
+        self.selected_printer_name = selected_name
+        self.settings.setValue("printer/name", selected_name)
+        self.settings.sync()
+        self._update_printer_status_label()
+        self.status_bar.showMessage(f"已选择打印机：{selected_name}，下次启动将继续使用。")
 
     def _build_date_summary_group(self) -> QGroupBox:
         group = QGroupBox("按日期汇总")
@@ -537,6 +708,8 @@ class MainWindow(QMainWindow):
         self.date_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.date_table.verticalHeader().setVisible(False)
         self.date_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.date_table.setMinimumHeight(120)
+        self.date_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.date_table.cellChanged.connect(self._on_date_table_cell_changed)
         layout.addWidget(self.date_table)
 
@@ -582,15 +755,47 @@ class MainWindow(QMainWindow):
             ]
         )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setWordWrap(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(12, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._detail_column_widths = [90, 78, 72, 72, 72, 150, 135, 170, 170, 62, 90, 90, 150]
+        self._detail_column_min_widths = [76, 64, 62, 62, 62, 110, 100, 110, 110, 52, 72, 72, 90]
+        self._detail_flexible_columns = (5, 7, 8, 12)
+        self._adapt_detail_table_columns()
         layout.addWidget(self.table)
         return group
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "table"):
+            self._adapt_detail_table_columns()
+            self.table.resizeRowsToContents()
+        if hasattr(self, "date_table"):
+            self.date_table.resizeRowsToContents()
+
+    def _adapt_detail_table_columns(self) -> None:
+        """在可用宽度内分配列宽，空间不足时保留水平滚动，避免内容被截断。"""
+        if not hasattr(self, "table"):
+            return
+
+        available_width = max(self.table.viewport().width(), 0)
+        minimum_total = sum(self._detail_column_min_widths)
+        widths = list(self._detail_column_widths)
+        if available_width >= minimum_total:
+            extra_width = available_width - sum(widths)
+            if extra_width > 0:
+                flexible_count = len(self._detail_flexible_columns)
+                per_column, remainder = divmod(extra_width, flexible_count)
+                for position, column_index in enumerate(self._detail_flexible_columns):
+                    widths[column_index] += per_column + (1 if position < remainder else 0)
+        else:
+            widths = list(self._detail_column_min_widths)
+
+        for column_index, width in enumerate(widths):
+            self.table.setColumnWidth(column_index, width)
 
     def choose_directory(self) -> None:
         initial_directory = self.selected_directory or self.default_directory
@@ -617,13 +822,34 @@ class MainWindow(QMainWindow):
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.current_result.output_directory))
 
-    def open_archive_excel(self) -> None:
-        archive_path = get_default_archive_path()
-        if not archive_path.exists():
-            QMessageBox.warning(self, "归档文件不存在", f"暂未找到归档 Excel：\n{archive_path}\n\n请先执行一次打印归档。")
+    def generate_archive_excel(self) -> None:
+        if self.current_result is None or not self.current_result.applied:
+            QMessageBox.warning(self, "缺少汇总结果", "请先执行“分析汇总”，生成整理结果后再生成归档 Excel。")
+            return
+
+        self._refresh_summary_artifacts()
+        if self.current_result is None:
+            return
+
+        archive_path = get_default_archive_path(self.current_result.source_directory)
+        try:
+            append_print_archive(
+                self.current_result,
+                archive_path=archive_path,
+                printed_jobs=0,
+                unique_files=0,
+                taxi_amount=self._get_taxi_amount(),
+                subsidy_amount=self._get_subsidy_amount(),
+                in_transit_amount=self._get_in_transit_amount(),
+                travel_in_transit=self._get_travel_in_transit(),
+            )
+        except Exception as error:
+            QMessageBox.critical(self, "归档生成失败", str(error))
+            self.status_bar.showMessage("归档 Excel 生成失败。")
             return
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_path)))
+        self.status_bar.showMessage(f"已生成并打开归档 Excel：{archive_path}")
 
     def upload_pdfs_to_public_disk(self) -> None:
         if self.current_result is None or not self.current_result.applied:
@@ -853,9 +1079,14 @@ class MainWindow(QMainWindow):
 
         self._refresh_summary_artifacts()
 
-        default_printer = QPrinterInfo.defaultPrinter()
-        if default_printer.isNull():
-            QMessageBox.critical(self, "打印失败", "未检测到默认打印机，请先在 Windows 中设置默认打印机。")
+        available_printer_names = self._available_printer_names()
+        if not self.selected_printer_name or self.selected_printer_name not in available_printer_names:
+            QMessageBox.warning(self, "未选择可用打印机", "请选择当前可用的打印机后再打印。")
+            self.choose_printer()
+            return
+
+        selected_printer_name = self.selected_printer_name
+        if not selected_printer_name:
             return
 
         queue = build_summary_sheet_queue(self.current_result) if summary_only else build_print_queue(self.current_result)
@@ -873,7 +1104,7 @@ class MainWindow(QMainWindow):
             self,
             "确认打印",
             (
-                f"将发送打印任务到默认打印机：{default_printer.printerName()}\n"
+                f"将发送打印任务到：{selected_printer_name}\n"
                 f"打印内容：{task_label}\n"
                 f"纸张：A5\n"
                 f"打印文件数：{unique_files}\n"
@@ -899,6 +1130,7 @@ class MainWindow(QMainWindow):
             subsidy_amount=subsidy_amount,
             in_transit_amount=in_transit_amount,
             travel_in_transit=travel_in_transit,
+            printer_name=selected_printer_name,
             task_label=task_label,
         )
 
@@ -912,6 +1144,7 @@ class MainWindow(QMainWindow):
         subsidy_amount: float,
         in_transit_amount: float,
         travel_in_transit: str,
+        printer_name: str,
         task_label: str,
     ) -> None:
         if self.current_result is None:
@@ -920,7 +1153,7 @@ class MainWindow(QMainWindow):
         self.current_print_task_label = task_label
         self._set_busy(True)
         self.phase_label.setText(f"当前状态：正在提交{task_label}")
-        self.status_bar.showMessage(f"正在向默认打印机发送{task_label}，请稍候...")
+        self.status_bar.showMessage(f"正在向 {printer_name} 发送{task_label}，请稍候...")
 
         progress_dialog = QProgressDialog("正在准备打印...", None, 0, total_jobs, self)
         progress_dialog.setWindowTitle("打印进度")
@@ -942,6 +1175,7 @@ class MainWindow(QMainWindow):
             subsidy_amount=subsidy_amount,
             in_transit_amount=in_transit_amount,
             travel_in_transit=travel_in_transit,
+            printer_name=printer_name,
         )
         self.print_worker.progress.connect(self._on_print_progress)
         self.print_worker.status.connect(self._on_print_status)
@@ -964,17 +1198,13 @@ class MainWindow(QMainWindow):
 
     def _on_print_completed(self, printed_jobs: int, archive_path: str, archive_warning: str) -> None:
         self.phase_label.setText(f"当前状态：{self.current_print_task_label}已提交")
-        self.status_bar.showMessage(
-            f"已发送 {printed_jobs} 份{self.current_print_task_label}到默认打印机"
-            + ("，并写入归档。" if not archive_warning else "，但归档未写入。")
-        )
+        self.status_bar.showMessage(f"已发送 {printed_jobs} 份{self.current_print_task_label}到已选打印机。")
         QMessageBox.information(
             self,
             "打印已提交",
             (
-                f"已发送 {printed_jobs} 份{self.current_print_task_label}到默认打印机，纸张默认 A5。\n"
-                f"归档文件：{archive_path}"
-                f"{archive_warning}"
+                f"已发送 {printed_jobs} 份{self.current_print_task_label}到已选打印机，纸张默认 A5。\n"
+                "如需归档，请点击“生成汇总清单并打开”。"
             ),
         )
 
@@ -1049,6 +1279,7 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self.choose_button.setEnabled(not busy)
+        self.printer_button.setEnabled(not busy)
         self.analyze_button.setEnabled(not busy)
         self.manual_summary_button.setEnabled(not busy)
         self.print_button.setEnabled(not busy)
@@ -1071,6 +1302,7 @@ class MainWindow(QMainWindow):
         is_idle = self.worker is None and self.print_worker is None
         self.manual_summary_button.setText("退出手动汇总" if self.manual_summary_mode else "手动填写汇总")
         self.manual_summary_button.setEnabled(is_idle)
+        self.printer_button.setEnabled(is_idle)
         self.print_button.setEnabled(is_idle and has_applied_result)
         self.print_summary_button.setEnabled(is_idle and has_applied_result)
         self.confirm_subsidy_button.setEnabled(is_idle and has_applied_result)
@@ -1240,6 +1472,11 @@ class MainWindow(QMainWindow):
             self.date_table.setItem(subtotal_row, column_index, self._build_date_table_item(value, editable=False, summary=True))
         for column_index, value in enumerate(total_values):
             self.date_table.setItem(total_row, column_index, self._build_date_table_item(value, editable=False, summary=True))
+        for column_index in range(self.date_table.columnCount()):
+            subtotal_item = self.date_table.item(subtotal_row, column_index)
+            if subtotal_item is not None:
+                subtotal_item.setBackground(QBrush(SUBTOTAL_ROW_COLOR))
+        self.date_table.resizeRowsToContents()
 
         self.updating_date_table = False
 
@@ -1272,7 +1509,7 @@ class MainWindow(QMainWindow):
                 str(record.print_copies),
                 record.pair_status,
                 record.review_status,
-                "；".join(record.warnings),
+                "；".join([*record.hints, *record.warnings]),
             ]
 
             row_background = WARNING_ROW_COLOR if (record.review_status != "ok" or record.warnings) else NORMAL_ROW_COLOR
@@ -1284,6 +1521,10 @@ class MainWindow(QMainWindow):
                 if row_foreground is not None:
                     item.setForeground(QBrush(row_foreground))
                 self.table.setItem(row_index, column_index, item)
+        self._adapt_detail_table_columns()
+        self.table.resizeRowsToContents()
+        for row_index in range(self.table.rowCount()):
+            self.table.setRowHeight(row_index, max(self.table.rowHeight(row_index), 32))
 
     def _get_subsidy_amount(self) -> float:
         self._sync_date_manual_values()

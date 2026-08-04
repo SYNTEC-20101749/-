@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 from .types import InvoiceRecognitionResult
 
@@ -88,6 +89,88 @@ def extract_train_ticket_trip_date(text: str) -> tuple[str, str]:
         (
             "乘车日期字段",
             re.compile(r"(?:乘车日期|发车日期|乘车时间|开车时间|发车时间)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
+        ),
+    ]
+
+    for label, pattern in patterns:
+        match = pattern.search(text)
+        if match and match.group(1):
+            trip_date = normalize_date_value(match.group(1))
+            if trip_date:
+                return trip_date, label
+
+    return "", "未命中"
+
+
+def normalize_month_day_value(value: str, year: int) -> str:
+    date_parts = re.findall(r"\d+", value)
+    if len(date_parts) < 2:
+        return ""
+    month, day = (int(part) for part in date_parts[:2])
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def extract_lodging_start_date(text: str, fallback_year: Optional[int] = None) -> tuple[str, str]:
+    """提取酒店入住起始日期；跨夜住宿统一归入入住当天。"""
+    patterns = [
+        (
+            "入住日期字段",
+            re.compile(r"(?:入住日期|入住时间|住店日期|抵店日期)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
+        ),
+        (
+            "住宿日期范围起始日",
+            re.compile(
+                r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)\s*(?:至|到|[-~～])\s*20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+            ),
+        ),
+    ]
+
+    for label, pattern in patterns:
+        match = pattern.search(text)
+        if match and match.group(1):
+            start_date = normalize_date_value(match.group(1))
+            if start_date:
+                return start_date, label
+
+    if fallback_year is not None:
+        short_date_patterns = [
+            (
+                "入住日期字段（补全年份）",
+                re.compile(r"(?:入住日期|入住时间|住店日期|抵店日期)\s*[:：]?\s*(\d{1,2}\s*[-/.月]\s*\d{1,2}日?)"),
+            ),
+            (
+                "住宿日期范围起始日（补全年份）",
+                re.compile(r"(\d{1,2}\s*[-/.月]\s*\d{1,2}日?)\s*(?:至|到|[-~～])\s*\d{1,2}\s*[-/.月]\s*\d{1,2}日?"),
+            ),
+        ]
+        for label, pattern in short_date_patterns:
+            match = pattern.search(text)
+            if match and match.group(1):
+                start_date = normalize_month_day_value(match.group(1), fallback_year)
+                if start_date:
+                    return start_date, label
+
+    return "", "未命中"
+
+
+def extract_lodging_stay_days(text: str) -> str:
+    """提取住宿票据注明的入住天数，用于明细提示栏展示。"""
+    match = re.search(r"(?:入住日期|入住时间|入离日期|住店日期)[\s\S]{0,80}?共\s*(\d+)\s*天", text)
+    return f"{match.group(1)}天" if match else ""
+
+
+def extract_toll_trip_date(text: str) -> tuple[str, str]:
+    """提取高速通行票的实际通行日期，无法识别时由调用方回退开票日期。"""
+    patterns = [
+        (
+            "通行日期字段",
+            re.compile(r"(?:通行日期|通行时间|交易日期|驶入时间|驶出时间)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
+        ),
+        (
+            "通行时间表格日期",
+            re.compile(r"(?:通行日期|通行时间|交易日期)[\s\S]{0,80}?(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)\s+\d{1,2}:\d{2}"),
         ),
     ]
 
@@ -299,14 +382,18 @@ def derive_amounts_from_candidates(candidates: list[float]) -> tuple[float, floa
 
 def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionResult:
     compact_text = normalize_text(text)
+    date_match = re.search(r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", compact_text)
+    fallback_year = int(re.search(r"20\d{2}", date_match.group(1)).group()) if date_match else None
     lodging_line_amounts = extract_lodging_line_amounts(compact_text)
     ride_itinerary_amounts = extract_ride_itinerary_amounts(compact_text)
     ride_itinerary_trip_date, ride_itinerary_trip_date_rule = extract_ride_itinerary_trip_date(compact_text)
     train_ticket_trip_date, train_ticket_trip_date_rule = extract_train_ticket_trip_date(compact_text)
+    lodging_start_date, lodging_start_date_rule = extract_lodging_start_date(compact_text, fallback_year)
+    lodging_stay_days = extract_lodging_stay_days(compact_text)
+    toll_trip_date, toll_trip_date_rule = extract_toll_trip_date(compact_text)
 
     explicit_number_match = re.search(r"(?:发票号码|票据号码|号码)[:：]?\s*([0-9]{8,20})", compact_text)
     generic_number_match = re.search(r"\b([0-9]{8,20})\b", compact_text)
-    date_match = re.search(r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", compact_text)
 
     total_amount, total_rule = extract_numeric_field(
         compact_text,
@@ -409,10 +496,14 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     if date_match:
         issue_date = normalize_date_value(date_match.group(1))
 
-    if category == "网约车行程单" and ride_itinerary_trip_date:
+    if category in {"网约车", "网约车行程单"} and ride_itinerary_trip_date:
         issue_date = ride_itinerary_trip_date
     elif category == "火车票" and train_ticket_trip_date:
         issue_date = train_ticket_trip_date
+    elif category == "住宿票" and lodging_start_date:
+        issue_date = lodging_start_date
+    elif category == "高速通行票" and toll_trip_date:
+        issue_date = toll_trip_date
 
     return InvoiceRecognitionResult(
         source_file=Path(source_file).name,
@@ -432,11 +523,16 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
             "amount": amount_rule,
             "tax_amount": tax_rule,
             "train_fare": train_fare_rule,
+            "lodging_stay_days": lodging_stay_days,
             "issue_date": (
                 ride_itinerary_trip_date_rule
-                if category == "网约车行程单"
+                if category in {"网约车", "网约车行程单"}
                 else train_ticket_trip_date_rule
                 if category == "火车票"
+                else lodging_start_date_rule
+                if category == "住宿票" and lodging_start_date
+                else toll_trip_date_rule
+                if category == "高速通行票" and toll_trip_date
                 else "开票日期"
             ),
         },

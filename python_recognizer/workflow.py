@@ -57,10 +57,10 @@ def calculate_summary_total(
     )
 
 
-def _parse_issue_date(issue_date: str) -> tuple[int, str]:
-    if not issue_date:
+def _parse_issue_date(actual_date: str) -> tuple[int, str]:
+    if not actual_date:
         return (1, UNKNOWN_DATE_LABEL)
-    return (0, issue_date)
+    return (0, actual_date)
 
 
 def sort_records(records: list[InvoiceOrganizeRecord]) -> None:
@@ -68,6 +68,7 @@ def sort_records(records: list[InvoiceOrganizeRecord]) -> None:
 
 
 def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[InvoiceDateSummary]:
+    """按票据实际发生日期归集；字段名为兼容历史数据仍沿用 issue_date。"""
     grouped: dict[str, dict[str, float]] = defaultdict(
         lambda: {
             "transport_total": 0.0,
@@ -79,8 +80,8 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
     )
 
     for record in records:
-        issue_date = record.issue_date or UNKNOWN_DATE_LABEL
-        summary_bucket = grouped[issue_date]
+        actual_date = record.issue_date or UNKNOWN_DATE_LABEL
+        summary_bucket = grouped[actual_date]
 
         if record.category in TRANSPORT_CATEGORIES:
             summary_bucket["transport_total"] += record.total_amount
@@ -92,12 +93,12 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
             summary_bucket["lodging_total"] += record.total_amount
 
     rows: list[InvoiceDateSummary] = []
-    for issue_date in sorted(grouped, key=_parse_issue_date):
-        bucket = grouped[issue_date]
+    for actual_date in sorted(grouped, key=_parse_issue_date):
+        bucket = grouped[actual_date]
         total = bucket["transport_total"] + bucket["toll_total"] + bucket["lodging_total"]
         rows.append(
             InvoiceDateSummary(
-                issue_date=issue_date,
+                issue_date=actual_date,
                 transport_total=round(bucket["transport_total"], 2),
                 toll_total=round(bucket["toll_total"], 2),
                 lodging_amount_total=round(bucket["lodging_amount_total"], 2),
@@ -117,23 +118,18 @@ def sanitize_filename_component(value: str) -> str:
     return sanitized.strip(" .")
 
 
-def build_output_folder_name() -> str:
-    return datetime.now().strftime("%Y%m%d")
+def build_output_directory(base_path: Path) -> Path:
+    """在待整理目录内创建固定名称的输出目录，不再追加序号。"""
+    return base_path / f"{base_path.name}-NewName"
 
 
-def build_unique_output_directory(base_path: Path) -> Path:
-    folder_name = build_output_folder_name()
-    candidate = base_path / folder_name
-
-    if not candidate.exists():
-        return candidate
-
-    suffix = 1
-    while True:
-        candidate = base_path / f"{folder_name}-{suffix}"
-        if not candidate.exists():
-            return candidate
-        suffix += 1
+def replace_output_directory(output_directory: Path) -> None:
+    """删除已有输出内容，确保每次整理结果完整替换旧版本。"""
+    if output_directory.is_dir():
+        shutil.rmtree(output_directory)
+    elif output_directory.exists():
+        output_directory.unlink()
+    output_directory.mkdir(parents=True, exist_ok=True)
 
 
 def build_rename_target(
@@ -424,7 +420,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
     if not base_path.exists() or not base_path.is_dir():
         raise NotADirectoryError(f"目录不存在: {base_path}")
 
-    output_directory = build_unique_output_directory(base_path)
+    output_directory = build_output_directory(base_path)
     output_folder_name = output_directory.name
     pair_results = pair_ride_hailing_documents(base_path, enable_ocr=enable_ocr)
     pair_status_lookup = pair_lookup(pair_results)
@@ -454,6 +450,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
             result.total_amount,
             pair_confidence,
         )
+        hints = [f"住宿天数：{result.matched_rules['lodging_stay_days']}"] if result.matched_rules.get("lodging_stay_days") else []
         review_status = "review_required" if warnings else "ok"
 
         records.append(
@@ -476,6 +473,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
                 pair_status=pair_confidence,
                 review_status=review_status,
                 warnings=warnings,
+                hints=hints,
             )
         )
 
@@ -549,7 +547,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
 
 def apply_organize_result(result: InvoiceOrganizeResult) -> InvoiceOrganizeResult:
     output_directory = Path(result.output_directory)
-    output_directory.mkdir(parents=True, exist_ok=True)
+    replace_output_directory(output_directory)
 
     for record in result.records:
         source_path = Path(record.source_path)
