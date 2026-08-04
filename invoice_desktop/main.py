@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,12 +15,16 @@ from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -47,11 +52,14 @@ WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
 APP_VERSION = "1.0.1"
+DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
+PUBLIC_DISK_RESEARCH_CENTER_SHARE = "研发中心"
 VERSION_UPDATES = [
     (
         "v1.0.1（当前版本）",
         [
             "新增“关于”入口，可查看当前版本号与版本更新信息。",
+            "新增 PDF 上传到局域公共盘入口，可将输出 PDF 复制到公共盘发票上传目录。",
         ],
     ),
     (
@@ -296,6 +304,49 @@ class PrintWorker(QThread):
         self.completed.emit(printed_jobs, str(archive_path), archive_warning)
 
 
+class PublicDiskUploadDialog(QDialog):
+    def __init__(self, output_directory: Path, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.output_directory = output_directory
+        self.setWindowTitle("PDF上传到局域公共盘")
+        self.resize(680, 460)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        output_label = QLabel(f"输出文件夹：{output_directory}")
+        output_label.setWordWrap(True)
+        layout.addWidget(output_label)
+
+        self.file_list = QListWidget()
+        for file_path in sorted(path for path in output_directory.iterdir() if path.is_file()):
+            self.file_list.addItem(file_path.name)
+        layout.addWidget(self.file_list, 1)
+
+        address_label = QLabel("局域公共盘地址")
+        self.address_input = QLineEdit(DEFAULT_PUBLIC_DISK_ADDRESS)
+        layout.addWidget(address_label)
+        layout.addWidget(self.address_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("确认")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def public_disk_address(self) -> str:
+        return self.address_input.text().strip()
+
+    def listed_pdf_files(self) -> list[Path]:
+        files = []
+        for row_index in range(self.file_list.count()):
+            file_path = self.output_directory / self.file_list.item(row_index).text()
+            if file_path.suffix.lower() == ".pdf":
+                files.append(file_path)
+        return files
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -435,6 +486,10 @@ class MainWindow(QMainWindow):
         self.open_output_button.setProperty("role", "success")
         self.open_output_button.clicked.connect(self.open_output_directory)
 
+        self.upload_public_disk_button = QPushButton("pdf上传到局域公共盘")
+        self.upload_public_disk_button.setProperty("role", "success")
+        self.upload_public_disk_button.clicked.connect(self.upload_pdfs_to_public_disk)
+
         self.open_archive_button = QPushButton("打开归档 Excel")
         self.open_archive_button.setProperty("role", "success")
         self.open_archive_button.clicked.connect(self.open_archive_excel)
@@ -450,6 +505,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.print_button)
         button_row.addWidget(self.open_archive_button)
         button_row.addWidget(self.open_output_button)
+        button_row.addWidget(self.upload_public_disk_button)
         button_row.addWidget(self.manual_summary_button)
         button_row.addWidget(self.print_summary_button)
         button_row.addWidget(self.about_button)
@@ -563,6 +619,99 @@ class MainWindow(QMainWindow):
             return
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(archive_path)))
+
+    def upload_pdfs_to_public_disk(self) -> None:
+        if self.current_result is None or not self.current_result.applied:
+            QMessageBox.warning(self, "输出目录未生成", "请先执行“分析汇总”，生成输出文件后再上传。")
+            return
+
+        self._refresh_summary_artifacts()
+        output_directory = Path(self.current_result.output_directory)
+        if not output_directory.exists():
+            QMessageBox.warning(self, "输出目录不存在", f"暂未找到输出目录：\n{output_directory}")
+            return
+
+        dialog = PublicDiskUploadDialog(output_directory, self)
+        if dialog.exec_() != QDialog.Accepted:
+            self.status_bar.showMessage("已取消上传到局域公共盘。")
+            return
+
+        pdf_files = dialog.listed_pdf_files()
+        if not pdf_files:
+            QMessageBox.warning(self, "没有 PDF 文件", "当前输出文件夹中没有可上传的 PDF 文件。")
+            return
+
+        try:
+            target_directory = self._resolve_public_disk_upload_directory(dialog.public_disk_address())
+            copied_count = 0
+            for source_path in pdf_files:
+                shutil.copy2(source_path, target_directory / source_path.name)
+                copied_count += 1
+        except Exception as error:
+            QMessageBox.critical(self, "上传失败", str(error))
+            self.status_bar.showMessage("上传到局域公共盘失败。")
+            return
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_directory)))
+        self.status_bar.showMessage(f"已复制 {copied_count} 个 PDF 到局域公共盘。")
+        QMessageBox.information(
+            self,
+            "上传完成",
+            f"已复制 {copied_count} 个 PDF 到：\n{target_directory}",
+        )
+
+    def _resolve_public_disk_upload_directory(self, public_disk_address: str) -> Path:
+        cleaned_address = self._normalize_unc_address(public_disk_address)
+        if not cleaned_address:
+            raise RuntimeError("请填写局域公共盘地址。")
+
+        start_path = Path(cleaned_address)
+        direct_target = self._find_public_disk_target_from_path(start_path)
+        if direct_target is not None:
+            return direct_target
+
+        research_center_directory = (
+            start_path
+            if start_path.name == PUBLIC_DISK_RESEARCH_CENTER_SHARE
+            else Path(f"{cleaned_address}\\{PUBLIC_DISK_RESEARCH_CENTER_SHARE}")
+        )
+        direct_target = self._find_public_disk_target_from_path(research_center_directory)
+        if direct_target is not None:
+            return direct_target
+
+        searched_paths = "\n".join(str(path) for path in [start_path, research_center_directory])
+        raise RuntimeError(
+            "未找到局域公共盘上传目录。请确认地址可以访问，或直接填写到“发票上传”文件夹/“产机产品”文件夹的完整路径。\n\n"
+            f"已尝试：\n{searched_paths}"
+        )
+
+    def _normalize_unc_address(self, public_disk_address: str) -> str:
+        cleaned_address = public_disk_address.strip().strip('"').strip("'").replace("/", "\\").rstrip("\\")
+        if cleaned_address.startswith("\\") and not cleaned_address.startswith("\\\\"):
+            cleaned_address = f"\\{cleaned_address}"
+        return cleaned_address
+
+    def _find_public_disk_target_from_path(self, start_path: Path) -> Optional[Path]:
+        if start_path.name == "产机产品" and start_path.exists():
+            return start_path
+
+        if "发票上传" in start_path.name:
+            target_directory = start_path / "产机产品"
+            return target_directory if target_directory.exists() else None
+
+        if not start_path.exists() or not start_path.is_dir():
+            return None
+
+        candidates = []
+        for path in start_path.rglob("*"):
+            if path.is_dir() and "发票上传" in path.name:
+                target_directory = path / "产机产品"
+                if target_directory.exists():
+                    candidates.append(target_directory)
+
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda path: str(path))[0]
 
     def show_about(self) -> None:
         update_text = "\n\n".join(
@@ -904,6 +1053,7 @@ class MainWindow(QMainWindow):
         self.add_date_row_button.setEnabled(not busy and self.manual_summary_mode)
         self.remove_date_row_button.setEnabled(not busy and self.manual_summary_mode and self._date_data_row_count() > 0)
         self.open_output_button.setEnabled(not busy)
+        self.upload_public_disk_button.setEnabled(not busy)
         self.open_archive_button.setEnabled(not busy)
         self.date_table.setEnabled(not busy)
         if not busy:
@@ -920,6 +1070,7 @@ class MainWindow(QMainWindow):
         self.print_summary_button.setEnabled(is_idle and has_applied_result)
         self.confirm_subsidy_button.setEnabled(is_idle and has_applied_result)
         self.open_output_button.setEnabled(is_idle and has_applied_result)
+        self.upload_public_disk_button.setEnabled(is_idle and has_applied_result)
         self.open_archive_button.setEnabled(is_idle)
 
     def _update_manual_summary_controls(self) -> None:
