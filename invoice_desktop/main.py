@@ -51,15 +51,20 @@ WARNING_ROW_COLOR = QColor("#FFF7E6")
 WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_RESEARCH_CENTER_SHARE = "研发中心"
 VERSION_UPDATES = [
     (
-        "v1.0.1（当前版本）",
+        "v1.0.2（当前版本）",
+        [
+            "新增 PDF 上传到局域公共盘入口，可将输出 PDF 复制到公共盘发票上传目录。",
+        ],
+    ),
+    (
+        "v1.0.1",
         [
             "新增“关于”入口，可查看当前版本号与版本更新信息。",
-            "新增 PDF 上传到局域公共盘入口，可将输出 PDF 复制到公共盘发票上传目录。",
         ],
     ),
     (
