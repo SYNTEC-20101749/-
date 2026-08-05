@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QAction,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -55,12 +56,20 @@ WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
+AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 VERSION_UPDATES = [
     (
-        "v1.0.4（当前版本）",
+        "v1.0.5（当前版本）",
+        [
+            "新增每日网约车打车间隔统计，并写入行程单提示与归档备注。",
+            "新增 Windows 开机自启动开关。",
+        ],
+    ),
+    (
+        "v1.0.4",
         [
             "局域公共盘上传目标可自由选择，并自动记忆上次成功使用的文件夹。",
         ],
@@ -488,6 +497,7 @@ class MainWindow(QMainWindow):
         self.settings_nav_list = QListWidget()
         self.settings_nav_list.setProperty("role", "settingsNav")
         self.settings_nav_list.addItem("打印机设定")
+        self.settings_nav_list.addItem("开机自启动")
 
         self.settings_pages = QStackedWidget()
         placeholder_page = QWidget()
@@ -524,6 +534,23 @@ class MainWindow(QMainWindow):
         printer_page_layout.addStretch(1)
         self.settings_pages.addWidget(printer_page)
 
+        auto_start_page = QWidget()
+        auto_start_page_layout = QVBoxLayout(auto_start_page)
+        auto_start_page_layout.setContentsMargins(0, 0, 0, 0)
+        auto_start_group = QGroupBox("开机自启动")
+        auto_start_layout = QVBoxLayout(auto_start_group)
+        auto_start_layout.setSpacing(10)
+        auto_start_description = QLabel("开启后，当前 Windows 用户登录时会自动启动发票管理系统。")
+        auto_start_description.setWordWrap(True)
+        auto_start_layout.addWidget(auto_start_description)
+        self.auto_start_checkbox = QCheckBox("开启开机自启动")
+        self.auto_start_checkbox.setChecked(self._is_auto_start_enabled())
+        self.auto_start_checkbox.toggled.connect(self.set_auto_start_enabled)
+        auto_start_layout.addWidget(self.auto_start_checkbox)
+        auto_start_page_layout.addWidget(auto_start_group)
+        auto_start_page_layout.addStretch(1)
+        self.settings_pages.addWidget(auto_start_page)
+
         self.settings_nav_list.currentRowChanged.connect(self._on_settings_option_changed)
         content_layout.addWidget(self.settings_nav_list)
         content_layout.addWidget(self.settings_pages, 1)
@@ -553,6 +580,53 @@ class MainWindow(QMainWindow):
         self._select_printer_settings_page()
         self.settings_dialog.exec_()
 
+    @staticmethod
+    def _auto_start_command() -> str:
+        if getattr(sys, "frozen", False):
+            return f'"{Path(sys.executable).resolve()}"'
+        return f'"{Path(sys.executable).resolve()}" -m invoice_desktop.main'
+
+    def _is_auto_start_enabled(self) -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                value, _ = winreg.QueryValueEx(key, AUTO_START_VALUE_NAME)
+            return value == self._auto_start_command()
+        except (FileNotFoundError, OSError):
+            return False
+
+    def set_auto_start_enabled(self, enabled: bool) -> None:
+        if sys.platform != "win32":
+            QMessageBox.warning(self, "不支持", "开机自启动仅支持 Windows。")
+            return
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                if enabled:
+                    winreg.SetValueEx(key, AUTO_START_VALUE_NAME, 0, winreg.REG_SZ, self._auto_start_command())
+                else:
+                    try:
+                        winreg.DeleteValue(key, AUTO_START_VALUE_NAME)
+                    except FileNotFoundError:
+                        pass
+        except OSError as error:
+            self.auto_start_checkbox.blockSignals(True)
+            self.auto_start_checkbox.setChecked(not enabled)
+            self.auto_start_checkbox.blockSignals(False)
+            QMessageBox.critical(self, "设置失败", f"无法更新开机自启动设置：\n{error}")
+            return
+
+        self.status_bar.showMessage("已开启开机自启动。" if enabled else "已关闭开机自启动。")
+
     def _build_header(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -581,14 +655,14 @@ class MainWindow(QMainWindow):
         return month_index // 12, month_index % 12 + 1
 
     def _get_reimbursement_period(self, current_date):
-        if current_date.day >= 26:
+        if current_date.day >= 21:
             start_date = current_date.replace(day=26)
             next_year, next_month = self._shift_month(current_date.year, current_date.month, 1)
-            deadline = current_date.replace(year=next_year, month=next_month, day=25)
+            deadline = current_date.replace(year=next_year, month=next_month, day=20)
         else:
             previous_year, previous_month = self._shift_month(current_date.year, current_date.month, -1)
             start_date = current_date.replace(year=previous_year, month=previous_month, day=26)
-            deadline = current_date.replace(day=25)
+            deadline = current_date.replace(day=20)
         return start_date, deadline
 
     def _update_reimbursement_reminder(self) -> None:
@@ -1511,7 +1585,19 @@ class MainWindow(QMainWindow):
                 str(record.print_copies),
                 record.pair_status,
                 record.review_status,
-                "；".join([*record.hints, *record.warnings]),
+                "；".join(
+                    [
+                        *record.hints,
+                        *(
+                            [f"行程时间：{record.ride_start_time}-{record.ride_end_time}"]
+                            if record.ride_start_time and record.ride_end_time
+                            else []
+                        ),
+                        *([f"住宿票种：{record.lodging_invoice_type}"] if record.lodging_invoice_type else []),
+                        *([f"购方税号：{record.buyer_tax_id}"] if record.buyer_tax_id else []),
+                        *record.warnings,
+                    ]
+                ),
             ]
 
             row_background = WARNING_ROW_COLOR if (record.review_status != "ok" or record.warnings) else NORMAL_ROW_COLOR
@@ -1603,6 +1689,7 @@ class MainWindow(QMainWindow):
                 lodging_amount_total=round(bucket["lodging_amount_total"], 2),
                 lodging_tax_total=round(bucket["lodging_tax_total"], 2),
                 lodging_total=round(bucket["lodging_total"], 2),
+                ride_hailing_interval="",
                 total=round(bucket["transport_total"] + bucket["toll_total"] + bucket["lodging_total"], 2),
             )
             for issue_date, bucket in grouped_rows.items()

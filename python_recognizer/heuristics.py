@@ -7,6 +7,7 @@ from typing import Optional
 from .types import InvoiceRecognitionResult
 
 MONEY_PATTERN = r"([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)"
+EXPECTED_BUYER_TAX_ID = "91320594688334374M"
 
 
 def normalize_text(input_text: str) -> str:
@@ -253,7 +254,7 @@ def extract_ride_itinerary_trip_date(text: str) -> tuple[str, str]:
     patterns = [
         (
             "行程时间日期",
-            re.compile(r"(?:行程时间|行程日期|乘车时间|用车时间|上车时间|出发时间)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
+            re.compile(r"(?:行程时间|行程日期|行程起止日期|乘车时间|用车时间|上车时间|出发时间)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
         ),
         (
             "行程时间范围日期",
@@ -273,6 +274,28 @@ def extract_ride_itinerary_trip_date(text: str) -> tuple[str, str]:
                 return trip_date, label
 
     return "", "未命中"
+
+
+def extract_ride_trip_times(text: str) -> tuple[str, str]:
+    """提取行程单表格中的最早、最晚用车时间。"""
+    time_values = re.findall(
+        r"(?<!\d)(?:20\d{2}[-/.年])?\d{1,2}[-/.月]\d{1,2}日?\s*(\d{1,2}:\d{2})(?::\d{2})?",
+        text,
+    )
+    if time_values:
+        valid_times = [
+            value
+            for value in time_values
+            if int(value.split(":")[0]) < 24 and int(value.split(":")[1]) < 60
+        ]
+        if valid_times:
+            return min(valid_times), max(valid_times)
+
+    start_match = re.search(r"(?:上车时间|出发时间|开始时间)\s*[:：]?\s*(\d{1,2}:\d{2})", text)
+    end_match = re.search(r"(?:下车时间|到达时间|结束时间)\s*[:：]?\s*(\d{1,2}:\d{2})", text)
+    if start_match and end_match:
+        return start_match.group(1), end_match.group(1)
+    return "", ""
 
 
 def derive_invoice_category(text: str, attachment_name: str, vendor: str) -> str:
@@ -356,6 +379,42 @@ def extract_vendor_name(text: str, source_file: str) -> str:
     return Path(source_file).stem
 
 
+def extract_buyer_tax_id(text: str) -> str:
+    """提取购买方统一社会信用代码或纳税人识别号，避免误取销售方税号。"""
+    full_compact_text = re.sub(r"\s+", "", text).upper()
+    # 目标购方税号直接命中即可确认；不依赖 PDF 文本层是否保留“购买方信息”字段标签。
+    if EXPECTED_BUYER_TAX_ID in full_compact_text:
+        return EXPECTED_BUYER_TAX_ID
+
+    buyer_section = re.search(
+        r"购买方\s*信息?\s*([\s\S]{0,800}?)(?=销售方\s*信息?|项目名称|货物或应税劳务|$)",
+        text,
+        re.IGNORECASE,
+    )
+    candidate_text = buyer_section.group(1) if buyer_section else text
+    compact_candidate = re.sub(r"\s+", "", candidate_text).upper()
+    field_pattern = re.compile(
+        r"(?:统一社会信用代码|纳税人识别号|税号)(?:/|／|、|及|或)*(?:统一社会信用代码|纳税人识别号|税号)?[:：]?([0-9A-Z]{15,20})"
+    )
+    match = field_pattern.search(compact_candidate)
+    if match:
+        return match.group(1)
+
+    # 部分 PDF 文本层会丢失字段标签；仅在购买方区块内回退提取，避免误取销售方税号。
+    fallback_match = re.search(r"(?<![0-9A-Z])([0-9A-Z]{18})(?![0-9A-Z])", compact_candidate)
+    return fallback_match.group(1) if fallback_match else ""
+
+
+def derive_lodging_invoice_type(text: str, category: str) -> str:
+    if category != "住宿票":
+        return ""
+    if re.search(r"(?:增值税)?专用发票|专票", text, re.IGNORECASE):
+        return "专票"
+    if re.search(r"(?:增值税)?普通发票|电子普通发票|普票", text, re.IGNORECASE):
+        return "普票"
+    return "待核验"
+
+
 def derive_amounts_from_candidates(candidates: list[float]) -> tuple[float, float, float, dict[str, str]] | None:
     normalized_candidates = sorted({value for value in candidates if value > 0}, reverse=True)
 
@@ -387,6 +446,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     lodging_line_amounts = extract_lodging_line_amounts(compact_text)
     ride_itinerary_amounts = extract_ride_itinerary_amounts(compact_text)
     ride_itinerary_trip_date, ride_itinerary_trip_date_rule = extract_ride_itinerary_trip_date(compact_text)
+    ride_start_time, ride_end_time = extract_ride_trip_times(compact_text)
     train_ticket_trip_date, train_ticket_trip_date_rule = extract_train_ticket_trip_date(compact_text)
     lodging_start_date, lodging_start_date_rule = extract_lodging_start_date(compact_text, fallback_year)
     lodging_stay_days = extract_lodging_stay_days(compact_text)
@@ -435,6 +495,8 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
 
     vendor = extract_vendor_name(compact_text, source_file)
     category = derive_invoice_category(compact_text, source_file, vendor)
+    buyer_tax_id = extract_buyer_tax_id(compact_text)
+    lodging_invoice_type = derive_lodging_invoice_type(compact_text, category)
 
     if ride_itinerary_amounts and category == "网约车行程单":
         total_amount = total_amount or ride_itinerary_amounts[0]
@@ -516,6 +578,10 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
         total_amount=resolved_total_amount or round(resolved_amount + resolved_tax_amount, 2),
         issue_date=issue_date,
         category=category,
+        buyer_tax_id=buyer_tax_id,
+        lodging_invoice_type=lodging_invoice_type,
+        ride_start_time=ride_start_time if category == "网约车行程单" else "",
+        ride_end_time=ride_end_time if category == "网约车行程单" else "",
         text_length=len(compact_text),
         notes=compact_text[:180],
         matched_rules={

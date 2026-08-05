@@ -76,6 +76,7 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
             "lodging_amount_total": 0.0,
             "lodging_tax_total": 0.0,
             "lodging_total": 0.0,
+            "ride_times": [],
         }
     )
 
@@ -91,10 +92,21 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
             summary_bucket["lodging_amount_total"] += record.amount
             summary_bucket["lodging_tax_total"] += record.tax_amount
             summary_bucket["lodging_total"] += record.total_amount
+        if record.category == "网约车行程单" and record.ride_start_time and record.ride_end_time:
+            summary_bucket["ride_times"].extend([record.ride_start_time, record.ride_end_time])
 
     rows: list[InvoiceDateSummary] = []
     for actual_date in sorted(grouped, key=_parse_issue_date):
         bucket = grouped[actual_date]
+        ride_times = bucket["ride_times"]
+        ride_interval = ""
+        if len(ride_times) >= 2:
+            start_time, end_time = min(ride_times), max(ride_times)
+            start_minutes = int(start_time[:2]) * 60 + int(start_time[3:])
+            end_minutes = int(end_time[:2]) * 60 + int(end_time[3:])
+            if end_minutes >= start_minutes:
+                hours = (end_minutes - start_minutes) / 60
+                ride_interval = f"打车间隔：{hours:g}h（{start_time}-{end_time}）"
         total = bucket["transport_total"] + bucket["toll_total"] + bucket["lodging_total"]
         rows.append(
             InvoiceDateSummary(
@@ -104,6 +116,7 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
                 lodging_amount_total=round(bucket["lodging_amount_total"], 2),
                 lodging_tax_total=round(bucket["lodging_tax_total"], 2),
                 lodging_total=round(bucket["lodging_total"], 2),
+                ride_hailing_interval=ride_interval,
                 total=round(total, 2),
             )
         )
@@ -193,7 +206,19 @@ def correct_ride_hailing_amount_from_filename(record_result, file_name: str) -> 
         record_result.tax_amount = 0.0
 
 
-def build_review_warnings(number: str, category: str, amount: float, total_amount: float, pair_status: str) -> list[str]:
+EXPECTED_BUYER_TAX_ID = "91320594688334374M"
+TAX_ID_REVIEW_EXEMPT_CATEGORIES = {"火车票", "机票", "网约车行程单"}
+
+
+def build_review_warnings(
+    number: str,
+    category: str,
+    amount: float,
+    total_amount: float,
+    pair_status: str,
+    buyer_tax_id: str,
+    lodging_invoice_type: str,
+) -> list[str]:
     warnings: list[str] = []
     if not number and category not in {"网约车行程单", "火车票"}:
         warnings.append("缺少发票号码")
@@ -205,6 +230,13 @@ def build_review_warnings(number: str, category: str, amount: float, total_amoun
         warnings.append("网约车行程单未配对")
     if category == "网约车" and total_amount <= 0 and amount <= 0:
         warnings.append("网约车金额未识别")
+    if category not in TAX_ID_REVIEW_EXEMPT_CATEGORIES:
+        if not buyer_tax_id:
+            warnings.append("购买方统一社会信用代码/纳税人识别号未识别")
+        elif buyer_tax_id != EXPECTED_BUYER_TAX_ID:
+            warnings.append(f"购买方税号不匹配：{buyer_tax_id}")
+    if category == "住宿票" and lodging_invoice_type == "待核验":
+        warnings.append("住宿发票类型（专票/普票）待核验")
     return warnings
 
 
@@ -324,7 +356,7 @@ def export_summary_sheet(
     )
 
     manual_values = daily_manual_values or {}
-    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿合计", "在途", "出差补贴"]]
+    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿合计", "在途", "出差补贴", "备注"]]
     subsidy_total = 0.0
     taxi_total = 0.0
     in_transit_total = 0.0
@@ -344,6 +376,7 @@ def export_summary_sheet(
                 format_money(item.lodging_total),
                 item_travel_in_transit,
                 format_money(item_subsidy_amount) if item_subsidy_amount else "",
+                item.ride_hailing_interval,
             ]
         )
     daily_rows.append(
@@ -357,11 +390,12 @@ def export_summary_sheet(
             format_money(result.summary.lodging_total),
             "",
             format_money(subsidy_total + in_transit_total),
+            "",
         ]
     )
     effective_taxi_amount = taxi_amount if taxi_amount else taxi_total
     effective_in_transit_amount = in_transit_total
-    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", ""])
+    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", "", ""])
     subtotal_row_index = len(result.summary.daily_breakdown) + 1
 
     daily_table_style = _build_table_style()
@@ -381,7 +415,7 @@ def export_summary_sheet(
         Spacer(1, 10),
         Table(
             daily_rows,
-            colWidths=[40, 34, 34, 32, 38, 34, 38, 32, 34],
+            colWidths=[28, 27, 27, 25, 32, 28, 32, 26, 27, 70],
             repeatRows=1,
             style=daily_table_style,
         ),
@@ -449,6 +483,8 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
             result.amount,
             result.total_amount,
             pair_confidence,
+            result.buyer_tax_id,
+            result.lodging_invoice_type,
         )
         hints = [f"住宿天数：{result.matched_rules['lodging_stay_days']}"] if result.matched_rules.get("lodging_stay_days") else []
         review_status = "review_required" if warnings else "ok"
@@ -458,6 +494,10 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
                 source_file=file_path.name,
                 source_path=str(file_path),
                 category=result.category,
+                buyer_tax_id=result.buyer_tax_id,
+                lodging_invoice_type=result.lodging_invoice_type,
+                ride_start_time=result.ride_start_time,
+                ride_end_time=result.ride_end_time,
                 number=result.number,
                 vendor=result.vendor,
                 issue_date=result.issue_date,
@@ -533,6 +573,16 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
         ),
         daily_breakdown=summarize_records_by_date(records),
     )
+
+    interval_by_date = {
+        item.issue_date: item.ride_hailing_interval
+        for item in summary.daily_breakdown
+        if item.ride_hailing_interval
+    }
+    for record in records:
+        interval_hint = interval_by_date.get(record.issue_date)
+        if record.category == "网约车行程单" and interval_hint:
+            record.hints.append(interval_hint)
 
     return InvoiceOrganizeResult(
         source_directory=str(base_path),

@@ -15,6 +15,10 @@ class InvoiceRecognitionResult:
     total_amount: float
     issue_date: str
     category: str
+    buyer_tax_id: str
+    lodging_invoice_type: str
+    ride_start_time: str
+    ride_end_time: str
     text_length: int
     notes: str
     matched_rules: dict[str, str]
@@ -59,6 +63,10 @@ class InvoiceOrganizeRecord:
     source_file: str
     source_path: str
     category: str
+    buyer_tax_id: str
+    lodging_invoice_type: str
+    ride_start_time: str
+    ride_end_time: str
     number: str
     vendor: str
     issue_date: str
@@ -88,6 +96,7 @@ class InvoiceDateSummary:
     lodging_amount_total: float
     lodging_tax_total: float
     lodging_total: float
+    ride_hailing_interval: str
     total: float
 
     def to_dict(self) -> dict[str, object]:
