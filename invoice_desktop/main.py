@@ -55,12 +55,26 @@ WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.4"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
-PUBLIC_DISK_RESEARCH_CENTER_SHARE = "研发中心"
+PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 VERSION_UPDATES = [
     (
-        "v1.0.2（当前版本）",
+        "v1.0.4（当前版本）",
+        [
+            "局域公共盘上传目标可自由选择，并自动记忆上次成功使用的文件夹。",
+        ],
+    ),
+    (
+        "v1.0.3",
+        [
+            "移除 QQ 邮箱拉取发票功能，保留本地文件夹整理流程。",
+            "优化界面自适应、按日期小计显示和局域公共盘上传规则。",
+            "生成汇总清单改为覆盖既有归档文件。",
+        ],
+    ),
+    (
+        "v1.0.2",
         [
             "新增 PDF 上传到局域公共盘入口，可将输出 PDF 复制到公共盘发票上传目录。",
         ],
@@ -327,7 +341,12 @@ class PrintWorker(QThread):
 
 
 class PublicDiskUploadDialog(QDialog):
-    def __init__(self, output_directory: Path, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        output_directory: Path,
+        initial_public_disk_address: str,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.output_directory = output_directory
         self.setWindowTitle("PDF上传到局域公共盘")
@@ -349,10 +368,16 @@ class PublicDiskUploadDialog(QDialog):
             self.file_list.addItem(file_path.name)
         layout.addWidget(self.file_list, 1)
 
-        address_label = QLabel("局域公共盘地址")
-        self.address_input = QLineEdit(DEFAULT_PUBLIC_DISK_ADDRESS)
+        address_label = QLabel("上传目标文件夹")
+        self.address_input = QLineEdit(initial_public_disk_address)
+        self.choose_target_button = QPushButton("选择文件夹")
+        self.choose_target_button.setProperty("role", "accent")
+        self.choose_target_button.clicked.connect(self.choose_target_directory)
+        address_row = QHBoxLayout()
+        address_row.addWidget(self.address_input, 1)
+        address_row.addWidget(self.choose_target_button)
         layout.addWidget(address_label)
-        layout.addWidget(self.address_input)
+        layout.addLayout(address_row)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("YES")
@@ -363,6 +388,15 @@ class PublicDiskUploadDialog(QDialog):
 
     def public_disk_address(self) -> str:
         return self.address_input.text().strip()
+
+    def choose_target_directory(self) -> None:
+        selected_directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择局域公共盘上传文件夹",
+            self.public_disk_address() or DEFAULT_PUBLIC_DISK_ADDRESS,
+        )
+        if selected_directory:
+            self.address_input.setText(selected_directory)
 
     @staticmethod
     def _is_summary_pdf(file_path: Path) -> bool:
@@ -862,7 +896,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输出目录不存在", f"暂未找到输出目录：\n{output_directory}")
             return
 
-        dialog = PublicDiskUploadDialog(output_directory, self)
+        dialog = PublicDiskUploadDialog(output_directory, self._load_public_disk_upload_directory(), self)
         if dialog.exec_() != QDialog.Accepted:
             self.status_bar.showMessage("已取消上传到局域公共盘。")
             return
@@ -883,6 +917,8 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("上传到局域公共盘失败。")
             return
 
+        self.settings.setValue(PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING, str(target_directory))
+        self.settings.sync()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_directory)))
         self.status_bar.showMessage(f"已复制 {copied_count} 个 PDF 到局域公共盘。")
         QMessageBox.information(
@@ -891,58 +927,24 @@ class MainWindow(QMainWindow):
             f"已复制 {copied_count} 个 PDF 到：\n{target_directory}",
         )
 
+    def _load_public_disk_upload_directory(self) -> str:
+        return str(self.settings.value(PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING, DEFAULT_PUBLIC_DISK_ADDRESS) or DEFAULT_PUBLIC_DISK_ADDRESS)
+
     def _resolve_public_disk_upload_directory(self, public_disk_address: str) -> Path:
         cleaned_address = self._normalize_unc_address(public_disk_address)
         if not cleaned_address:
-            raise RuntimeError("请填写局域公共盘地址。")
+            raise RuntimeError("请选择或填写局域公共盘上传目标文件夹。")
 
-        start_path = Path(cleaned_address)
-        direct_target = self._find_public_disk_target_from_path(start_path)
-        if direct_target is not None:
-            return direct_target
-
-        research_center_directory = (
-            start_path
-            if start_path.name == PUBLIC_DISK_RESEARCH_CENTER_SHARE
-            else Path(f"{cleaned_address}\\{PUBLIC_DISK_RESEARCH_CENTER_SHARE}")
-        )
-        direct_target = self._find_public_disk_target_from_path(research_center_directory)
-        if direct_target is not None:
-            return direct_target
-
-        searched_paths = "\n".join(str(path) for path in [start_path, research_center_directory])
-        raise RuntimeError(
-            "未找到局域公共盘上传目录。请确认地址可以访问，或直接填写到“发票上传”文件夹/“产机产品”文件夹的完整路径。\n\n"
-            f"已尝试：\n{searched_paths}"
-        )
+        target_directory = Path(cleaned_address)
+        if not target_directory.exists() or not target_directory.is_dir():
+            raise RuntimeError(f"无法访问上传目标文件夹：\n{target_directory}")
+        return target_directory
 
     def _normalize_unc_address(self, public_disk_address: str) -> str:
         cleaned_address = public_disk_address.strip().strip('"').strip("'").replace("/", "\\").rstrip("\\")
         if cleaned_address.startswith("\\") and not cleaned_address.startswith("\\\\"):
             cleaned_address = f"\\{cleaned_address}"
         return cleaned_address
-
-    def _find_public_disk_target_from_path(self, start_path: Path) -> Optional[Path]:
-        if start_path.name == "产机产品" and start_path.exists():
-            return start_path
-
-        if "发票上传" in start_path.name:
-            target_directory = start_path / "产机产品"
-            return target_directory if target_directory.exists() else None
-
-        if not start_path.exists() or not start_path.is_dir():
-            return None
-
-        candidates = []
-        for path in start_path.rglob("*"):
-            if path.is_dir() and "发票上传" in path.name:
-                target_directory = path / "产机产品"
-                if target_directory.exists():
-                    candidates.append(target_directory)
-
-        if not candidates:
-            return None
-        return sorted(candidates, key=lambda path: str(path))[0]
 
     def show_about(self) -> None:
         update_text = "\n\n".join(

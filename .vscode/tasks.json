@@ -52,6 +52,111 @@
 			],
 			"isBackground": false,
 			"group": "test"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.3",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"$source='d:\\Syntec\\小工具\\发票管理系统\\发票管理系统'; $root='C:\\SYNTECBuild\\InvoiceManager-v1.0.3'; $dist='C:\\SYNTECBuild\\dist-v1.0.3'; $work='C:\\SYNTECBuild\\work-v1.0.3'; $spec='C:\\SYNTECBuild\\spec-v1.0.3'; Remove-Item -LiteralPath $root,$dist,$work,$spec -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path $root -Force | Out-Null; Copy-Item -LiteralPath \"$source\\desktop_app.py\",\"$source\\version_info.txt\",\"$source\\requirements-python.txt\" -Destination $root -Force; Copy-Item -LiteralPath \"$source\\invoice_desktop\",\"$source\\python_recognizer\" -Destination $root -Recurse -Force; Set-Location $root; & 'C:\\Users\\20101749\\AppData\\Local\\Programs\\Python\\Python38\\python.exe' -m PyInstaller --onedir --windowed --version-file version_info.txt --name 'SYNTEC-发票管理系统' --noupx --clean --distpath $dist --workpath $work --specpath $spec desktop_app.py; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $app=Join-Path $dist 'SYNTEC-发票管理系统'; $exe=Join-Path $app 'SYNTEC-发票管理系统.exe'; $internal=Join-Path $app '_internal'; if (!(Test-Path -LiteralPath $exe)) { throw '未生成 EXE'; }; if (!(Test-Path -LiteralPath (Join-Path $internal 'python38.dll'))) { throw '缺少 python38.dll'; }; if (!(Test-Path -LiteralPath (Join-Path $internal '_ctypes.pyd'))) { throw '缺少 _ctypes.pyd'; }; $version=(Get-Item -LiteralPath $exe).VersionInfo; if ($version.CompanyName -notmatch 'SYNTEC' -or $version.LegalCopyright -notmatch 'SYNTEC') { throw '版本信息未包含 SYNTEC'; }; if ($version.FileVersion -ne '1.0.3.0') { throw \"文件版本不正确：$($version.FileVersion)\" }; Compress-Archive -LiteralPath $app -DestinationPath (Join-Path $dist 'SYNTEC-发票管理系统-v1.0.3-windows-x64.zip') -Force; Write-Output \"BUILD_OK=$app\"; Write-Output \"ARCHIVE_OK=$(Join-Path $dist 'SYNTEC-发票管理系统-v1.0.3-windows-x64.zip')\""
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.3",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"C:\\SYNTECBuild\\build_invoice_manager_v1_0_3.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.3 Verified",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"C:\\SYNTECBuild\\build_invoice_manager_v1_0_3.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.3 ASCII",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"C:\\SYNTECBuild\\build_invoice_manager_v1_0_3.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.3 Final",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"C:\\SYNTECBuild\\build_invoice_manager_v1_0_3.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.4",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\build_release_v1_0_4.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Publish Invoice Manager v1.0.4",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\publish_v1_0_4.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
 		}
 	],
 	"inputs": [

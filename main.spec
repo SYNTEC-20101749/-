@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['invoice_desktop\\main.py'],
+    ['desktop_app.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -21,24 +21,25 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='main',
+    name='SYNTEC-发票管理系统',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version_info.txt',
 )
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
-    name='main',
+    name='SYNTEC-发票管理系统',
 )
