@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-
 from openpyxl import Workbook, load_workbook
 
 from python_recognizer.types import InvoiceOrganizeResult
@@ -22,46 +20,12 @@ ARCHIVE_HEADERS = [
     "大众运输",
     "出租车费用",
     "过路费",
-    "住宿不含税",
-    "住宿税额",
-    "住宿合计",
+    "住宿费",
+    "税金",
     "出差补贴",
     "总计",
-    "在途",
     "备注",
 ]
-
-
-def _get_lodging_archive_values(result: InvoiceOrganizeResult) -> tuple[list[str], tuple[Optional[float], Optional[float], Optional[float]]]:
-    lodging_records = [record for record in result.records if record.category == "住宿票"]
-    lodging_types = {record.lodging_invoice_type for record in lodging_records}
-    special_records = [record for record in lodging_records if record.lodging_invoice_type == "专票"]
-
-    if lodging_types == {"普票"}:
-        return ["住宿（普票）不含税", "住宿（普票）税额", "住宿（普票）合计"], (None, None, None)
-
-    if lodging_types == {"专票"}:
-        prefix = "住宿（专票）"
-    elif "普票" in lodging_types and "专票" in lodging_types:
-        prefix = "住宿（专票；另含普票）"
-    else:
-        return ["住宿不含税", "住宿税额", "住宿合计"], (
-            round(result.summary.lodging_amount_total, 2),
-            round(result.summary.lodging_tax_total, 2),
-            round(result.summary.lodging_total, 2),
-        )
-
-    return [f"{prefix}不含税", f"{prefix}税额", f"{prefix}合计"], (
-        round(sum(record.amount for record in special_records), 2),
-        round(sum(record.tax_amount for record in special_records), 2),
-        round(sum(record.total_amount for record in special_records), 2),
-    )
-
-
-def _build_archive_headers(lodging_headers: list[str]) -> list[str]:
-    headers = list(ARCHIVE_HEADERS)
-    headers[11:14] = lodging_headers
-    return headers
 
 
 def _get_ride_hailing_interval_notes(result: InvoiceOrganizeResult) -> str:
@@ -136,8 +100,7 @@ def append_print_archive(
     target_path = archive_path or get_default_archive_path(result.source_directory)
     if target_path.exists():
         target_path.unlink()
-    lodging_headers, lodging_values = _get_lodging_archive_values(result)
-    workbook, worksheet = _ensure_workbook(target_path, _build_archive_headers(lodging_headers))
+    workbook, worksheet = _ensure_workbook(target_path, ARCHIVE_HEADERS)
     start_date, end_date = _get_trip_date_range(result)
 
     worksheet.append(
@@ -153,10 +116,10 @@ def append_print_archive(
             round(result.summary.transport_total, 2),
             round(taxi_amount, 2),
             round(result.summary.toll_total, 2),
-            *lodging_values,
+            round(result.summary.lodging_amount_total + result.summary.lodging_public_total, 2),
+            round(result.summary.lodging_tax_total, 2),
             round(subsidy_amount + in_transit_amount, 2),
             calculate_summary_total(result, subsidy_amount, taxi_amount, in_transit_amount),
-            travel_in_transit,
             _get_ride_hailing_interval_notes(result),
         ]
     )

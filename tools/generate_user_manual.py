@@ -12,7 +12,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.5.docx"
+OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.6.docx"
 
 
 def set_cell_shading(cell, color: str) -> None:
@@ -88,7 +88,7 @@ def add_title_page(document: Document) -> None:
 
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run("版本：v1.0.5\n适用对象：日常出差发票整理、汇总、打印及归档人员")
+    subtitle.add_run("版本：v1.0.6\n适用对象：日常出差发票整理、汇总、打印及归档人员")
     document.add_paragraph()
     note = document.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -126,7 +126,7 @@ def build_manual() -> None:
         "识别网约车、网约车行程单、火车票、高速通行票、住宿票等常用票据。",
         "自动匹配网约车发票与行程单，行程单不重复计入交通费用。",
         "按实际发生日期汇总大众运输、出租车费用、过路费、住宿不含税金额、住宿税额、住宿合计、在途及出差补贴。",
-        "自动生成汇总清单 PDF、整理后的 PDF 副本、可打印队列和发票打印汇总档案 Excel。",
+        "自动生成汇总清单 PDF、横向 A5 的汇总合成 PDF、整理后的 PDF 副本、可打印队列和发票打印汇总档案 Excel。",
         "对购方统一社会信用代码、住宿票种、未配对行程单、金额或发票号码缺失等情况给出复核提示。",
     ])
     document.add_heading("1.2 支持的票据与计费规则", level=2)
@@ -171,7 +171,7 @@ def build_manual() -> None:
         ["填写补贴/出租车", "显示按日期汇总表", "用于填写系统无法从票据中得出的费用。"],
         ["生成汇总清单并打开", "生成发票打印汇总档案.xlsx", "会覆盖当前来源目录内同名归档文件。"],
         ["打开输出目录", "打开整理后的 PDF 文件夹", "需先完成分析汇总。"],
-        ["pdf上传到局域公共盘", "复制输出目录内的票据 PDF 到指定公共盘", "汇总清单 PDF 不会进入上传列表。"],
+        ["pdf上传到局域公共盘", "复制输出目录内的票据 PDF 到指定公共盘", "按发票号码筛选票据及配套行程单，不上传汇总文件。"],
         ["一键打印", "打印汇总清单和全部票据", "纸张为 A5；住宿票、火车票默认打印 2 份。"],
         ["手动填写汇总", "不使用票据识别结果，手工新建按日期汇总", "进入后将不使用当前分析数据。"],
         ["只打印汇总清单", "仅打印汇总清单 PDF", "适用于重新打印封面汇总表。"],
@@ -227,6 +227,7 @@ def build_manual() -> None:
     document.add_heading("6. 汇总清单、打印与 Excel 归档", level=1)
     document.add_heading("6.1 汇总清单 PDF", level=2)
     document.add_paragraph("分析完成后，输出目录会生成“汇总清单.pdf”。内容包括按日期汇总表、备注列和报销流程检查项。备注列会显示每日打车间隔。")
+    document.add_paragraph("同时会生成“汇总合成.pdf”，该文件按实际打印顺序合并汇总清单及各票据，使用横向 A5 版面，便于预览、留存或统一打印。")
     document.add_heading("6.2 打印", level=2)
     add_bullets(document, [
         "点击“一键打印”前，先在“设定 → 打印机设定”中选择可用打印机。",
@@ -235,33 +236,33 @@ def build_manual() -> None:
         "打印机不可用、未设置默认打印机或纸张设置异常时，系统会显示提示。",
     ])
     document.add_heading("6.3 Excel 归档", level=2)
-    document.add_paragraph("点击“生成汇总清单并打开”后，系统会在来源目录生成“发票打印汇总档案.xlsx”，若已有同名文件将覆盖。归档文件包含出差日期、来源与输出目录、打印数量、各类费用、总计、在途和备注。")
+    document.add_paragraph("点击“生成汇总清单并打开”后，系统会在来源目录生成“发票打印汇总档案.xlsx”，若已有同名文件将覆盖。归档文件包含出差日期、来源与输出目录、打印数量、各类费用、总计和备注。")
     add_bullets(document, [
         "备注列：写入“日期：打车间隔：xh（最早-最晚）”。",
-        "住宿均为普票时，归档中的住宿不含税金额、税额、合计保持为空；住宿专票会写入对应专票金额。",
+        "“住宿费”=住宿专票不含税金额+住宿普票全额；“税金”仅记录住宿专票税额。",
         "Excel 用于归档与复核，不替代原始 PDF 发票。",
     ])
     document.add_heading("6.4 公共盘上传", level=2)
     add_numbered_steps(document, [
         "完成分析汇总后，点击“pdf上传到局域公共盘”。",
-        "在弹窗中确认待上传文件列表，填写或点击“选择文件夹”选择目标公共盘路径。",
-        "点击 YES 后，系统复制票据 PDF 到目标目录；“汇总清单.pdf”不会被上传。",
+        "在弹窗中确认待上传文件列表，填写或点击“选择文件夹”选择目标公共盘路径。列表会包含文件名含已识别发票号码的票据 PDF 及配套网约车行程单。",
+        "点击 YES 后，系统复制票据 PDF 到目标目录；“汇总清单.pdf”和“汇总合成.pdf”不会被上传。",
         "上传成功后，系统会记住本次目标路径，下次自动带出。",
     ])
 
     document.add_heading("7. 设置：打印机与开机自启动", level=1)
     document.add_heading("7.1 打开设置", level=2)
-    document.add_paragraph("从顶部菜单选择“设定”。左侧可切换“打印机设定”和“开机自启动”。")
+    document.add_paragraph("从顶部菜单选择“设定”，其中“打印机设定”和“开机自启动”分别打开独立的设定弹窗。")
     document.add_heading("7.2 打印机设定", level=2)
     add_numbered_steps(document, [
-        "在“设定”中选择“打印机设定”。",
+        "从顶部菜单选择“设定 → 打印机设定”。",
         "点击“选择打印机”。",
         "从 Windows 当前可用打印机列表选择目标设备。",
         "系统会保存选择，下次启动继续使用；如设备变更，请重新选择。",
     ])
     document.add_heading("7.3 开机自启动", level=2)
     add_bullets(document, [
-        "在“设定”中选择“开机自启动”，勾选“开启开机自启动”。",
+        "从顶部菜单选择“设定 → 开机自启动”，勾选“开启开机自启动”。",
         "开启后，当前 Windows 用户登录时将自动启动本软件。",
         "取消勾选即可关闭，不影响已生成的汇总、归档或设置。",
         "此功能使用当前用户的 Windows 启动项，无需管理员权限。",
@@ -290,7 +291,7 @@ def build_manual() -> None:
     ])
 
     document.add_paragraph()
-    closing = document.add_paragraph("文档版本：v1.0.5　　生成日期：2026-08-05")
+    closing = document.add_paragraph("文档版本：v1.0.6　　生成日期：2026-08-12")
     closing.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     closing.runs[0].font.color.rgb = RGBColor(107, 98, 87)
 

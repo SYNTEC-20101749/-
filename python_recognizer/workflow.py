@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+import re
 import shutil
+from xml.sax.saxutils import escape
 
-from reportlab.lib.pagesizes import A5
+from reportlab.lib.pagesizes import A5, landscape
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
@@ -14,7 +16,7 @@ from reportlab.lib.styles import ParagraphStyle
 
 from .extractors import extract_text
 from .heuristics import recognize_invoice_text
-from .pairing import extract_filename_pair_info, pair_ride_hailing_documents
+from .pairing import extract_filename_pair_info, iter_source_pdf_files, pair_ride_hailing_documents
 from .types import InvoiceDateSummary, InvoiceOrganizeRecord, InvoiceOrganizeResult, InvoiceOrganizeSummary
 
 
@@ -75,6 +77,7 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
             "toll_total": 0.0,
             "lodging_amount_total": 0.0,
             "lodging_tax_total": 0.0,
+            "lodging_public_total": 0.0,
             "lodging_total": 0.0,
             "ride_times": [],
         }
@@ -89,8 +92,11 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
         if record.category in TOLL_CATEGORIES:
             summary_bucket["toll_total"] += record.total_amount
         if record.category in LODGING_CATEGORIES:
-            summary_bucket["lodging_amount_total"] += record.amount
-            summary_bucket["lodging_tax_total"] += record.tax_amount
+            if record.lodging_invoice_type == "普票":
+                summary_bucket["lodging_public_total"] += record.total_amount
+            else:
+                summary_bucket["lodging_amount_total"] += record.amount
+                summary_bucket["lodging_tax_total"] += record.tax_amount
             summary_bucket["lodging_total"] += record.total_amount
         if record.category == "网约车行程单" and record.ride_start_time and record.ride_end_time:
             summary_bucket["ride_times"].extend([record.ride_start_time, record.ride_end_time])
@@ -106,7 +112,7 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
             end_minutes = int(end_time[:2]) * 60 + int(end_time[3:])
             if end_minutes >= start_minutes:
                 hours = (end_minutes - start_minutes) / 60
-                ride_interval = f"打车间隔：{hours:g}h（{start_time}-{end_time}）"
+                ride_interval = f"打车间隔：{hours:.1f}h（{start_time}-{end_time}）"
         total = bucket["transport_total"] + bucket["toll_total"] + bucket["lodging_total"]
         rows.append(
             InvoiceDateSummary(
@@ -115,6 +121,7 @@ def summarize_records_by_date(records: list[InvoiceOrganizeRecord]) -> list[Invo
                 toll_total=round(bucket["toll_total"], 2),
                 lodging_amount_total=round(bucket["lodging_amount_total"], 2),
                 lodging_tax_total=round(bucket["lodging_tax_total"], 2),
+                lodging_public_total=round(bucket["lodging_public_total"], 2),
                 lodging_total=round(bucket["lodging_total"], 2),
                 ride_hailing_interval=ride_interval,
                 total=round(total, 2),
@@ -173,7 +180,9 @@ def build_rename_target(
     return str(Path(output_folder_name) / f"{base_name}.pdf")
 
 
-def determine_print_copies(category: str) -> int:
+def determine_print_copies(category: str, lodging_invoice_type: str = "") -> int:
+    if category == "住宿票" and lodging_invoice_type == "普票":
+        return 1
     return 2 if category in DOUBLE_PRINT_CATEGORIES else 1
 
 
@@ -204,6 +213,26 @@ def correct_ride_hailing_amount_from_filename(record_result, file_name: str) -> 
     else:
         record_result.amount = record_result.total_amount
         record_result.tax_amount = 0.0
+
+
+def correct_train_ticket_amount_from_filename(record_result, file_name: str) -> None:
+    """以标准命名高铁票文件名中的金额兜底，防止 OCR 漏读小数部分。"""
+    if record_result.category != "火车票":
+        return
+
+    match = re.search(r"(?:^|[-_])(\d+\.\d{1,2})-(?:火车票|铁路电子客票)\.pdf$", file_name, re.IGNORECASE)
+    if not match:
+        return
+
+    filename_amount = round(float(match.group(1)), 2)
+    if filename_amount <= 0 or abs(record_result.total_amount - filename_amount) < 0.01:
+        return
+
+    record_result.total_amount = filename_amount
+    record_result.amount = filename_amount
+    record_result.tax_amount = 0.0
+    record_result.matched_rules["total_amount"] = "高铁票文件名金额校正"
+    record_result.matched_rules["amount"] = "高铁票文件名金额校正"
 
 
 EXPECTED_BUYER_TAX_ID = "91320594688334374M"
@@ -323,7 +352,7 @@ def export_summary_sheet(
 
     document = SimpleDocTemplate(
         str(summary_pdf_path),
-        pagesize=A5,
+        pagesize=landscape(A5),
         leftMargin=20,
         rightMargin=20,
         topMargin=24,
@@ -341,9 +370,21 @@ def export_summary_sheet(
     body_style = ParagraphStyle(
         "BodyStyle",
         fontName="STSong-Light",
-        fontSize=8,
-        leading=10,
+        fontSize=7.2,
+        leading=9,
         textColor=colors.HexColor("#24384E"),
+        wordWrap="CJK",
+        splitLongWords=True,
+    )
+    header_style = ParagraphStyle(
+        "HeaderStyle",
+        fontName="STSong-Light",
+        fontSize=6.2,
+        leading=7.5,
+        textColor=colors.HexColor("#17324D"),
+        alignment=1,
+        wordWrap="CJK",
+        splitLongWords=True,
     )
     section_style = ParagraphStyle(
         "SectionStyle",
@@ -356,7 +397,7 @@ def export_summary_sheet(
     )
 
     manual_values = daily_manual_values or {}
-    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿合计", "在途", "出差补贴", "备注"]]
+    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴", "备注"]]
     subsidy_total = 0.0
     taxi_total = 0.0
     in_transit_total = 0.0
@@ -373,6 +414,7 @@ def export_summary_sheet(
                 format_money(item.toll_total),
                 format_money(item.lodging_amount_total),
                 format_money(item.lodging_tax_total),
+                format_money(item.lodging_public_total),
                 format_money(item.lodging_total),
                 item_travel_in_transit,
                 format_money(item_subsidy_amount) if item_subsidy_amount else "",
@@ -387,6 +429,7 @@ def export_summary_sheet(
             format_money(result.summary.toll_total),
             format_money(result.summary.lodging_amount_total),
             format_money(result.summary.lodging_tax_total),
+            format_money(result.summary.lodging_public_total),
             format_money(result.summary.lodging_total),
             "",
             format_money(subsidy_total + in_transit_total),
@@ -395,10 +438,16 @@ def export_summary_sheet(
     )
     effective_taxi_amount = taxi_amount if taxi_amount else taxi_total
     effective_in_transit_amount = in_transit_total
-    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", "", ""])
+    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", "", "", ""])
     subtotal_row_index = len(result.summary.daily_breakdown) + 1
 
     daily_table_style = _build_table_style()
+    daily_table_style.add("FONTSIZE", (0, 0), (-1, -1), 7.2)
+    daily_table_style.add("LEADING", (0, 0), (-1, -1), 9)
+    daily_table_style.add("LEFTPADDING", (0, 0), (-1, -1), 3)
+    daily_table_style.add("RIGHTPADDING", (0, 0), (-1, -1), 3)
+    daily_table_style.add("TOPPADDING", (0, 0), (-1, -1), 3)
+    daily_table_style.add("BOTTOMPADDING", (0, 0), (-1, -1), 3)
     daily_table_style.add("BACKGROUND", (1, subtotal_row_index), (1, subtotal_row_index), colors.HexColor("#F9E3B8"))
     daily_table_style.add("TEXTCOLOR", (1, subtotal_row_index), (1, subtotal_row_index), colors.HexColor("#8A4B12"))
     daily_table_style.add("FONTNAME", (1, subtotal_row_index), (1, subtotal_row_index), "STSong-Light")
@@ -409,13 +458,17 @@ def export_summary_sheet(
         ["□ PDF文件上传"],
         ["□ 考勤申请"],
     ]
+    wrapped_daily_rows = [
+        [Paragraph(escape(str(value)), header_style if row_index == 0 else body_style) for value in row]
+        for row_index, row in enumerate(daily_rows)
+    ]
 
     story = [
         Paragraph(build_trip_summary_title(result), title_style),
         Spacer(1, 10),
         Table(
-            daily_rows,
-            colWidths=[28, 27, 27, 25, 32, 28, 32, 26, 27, 70],
+            wrapped_daily_rows,
+            colWidths=[36, 43, 43, 36, 47, 42, 52, 47, 40, 43, 48],
             repeatRows=1,
             style=daily_table_style,
         ),
@@ -423,7 +476,7 @@ def export_summary_sheet(
         Paragraph("报销流程检查", section_style),
         Table(
             checklist_rows,
-            colWidths=[316],
+            colWidths=[519],
             style=TableStyle(
                 [
                     ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
@@ -460,12 +513,13 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
     pair_status_lookup = pair_lookup(pair_results)
     records: list[InvoiceOrganizeRecord] = []
 
-    for file_path in sorted(base_path.glob("*.pdf")):
+    for file_path in iter_source_pdf_files(base_path):
         text, text_source, ocr_used = extract_text(file_path, enable_ocr=enable_ocr)
         result = recognize_invoice_text(text, str(file_path))
         result.text_source = text_source
         result.ocr_used = ocr_used
         correct_ride_hailing_amount_from_filename(result, file_path.name)
+        correct_train_ticket_amount_from_filename(result, file_path.name)
 
         pair_key, pair_confidence = pair_status_lookup.get(file_path.name, ("", "unpaired"))
         rename_target = build_rename_target(
@@ -507,7 +561,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
                 text_source=result.text_source,
                 ocr_used=result.ocr_used,
                 rename_target=rename_target,
-                print_copies=determine_print_copies(result.category),
+                print_copies=determine_print_copies(result.category, result.lodging_invoice_type),
                 printed=False,
                 pair_key=pair_key,
                 pair_status=pair_confidence,
@@ -560,11 +614,27 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
             2,
         ),
         lodging_amount_total=round(
-            sum(record.amount for record in records if record.category in LODGING_CATEGORIES),
+            sum(
+                record.amount
+                for record in records
+                if record.category in LODGING_CATEGORIES and record.lodging_invoice_type != "普票"
+            ),
             2,
         ),
         lodging_tax_total=round(
-            sum(record.tax_amount for record in records if record.category in LODGING_CATEGORIES),
+            sum(
+                record.tax_amount
+                for record in records
+                if record.category in LODGING_CATEGORIES and record.lodging_invoice_type != "普票"
+            ),
+            2,
+        ),
+        lodging_public_total=round(
+            sum(
+                record.total_amount
+                for record in records
+                if record.category in LODGING_CATEGORIES and record.lodging_invoice_type == "普票"
+            ),
             2,
         ),
         lodging_total=round(

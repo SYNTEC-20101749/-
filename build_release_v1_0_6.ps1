@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $sourceRoot = $PSScriptRoot
-$buildRoot = 'C:\SYNTECBuild\InvoiceManager-v1.0.5'
-$distRoot = 'C:\SYNTECBuild\dist-v1.0.5'
-$releaseZip = Join-Path $sourceRoot 'release\SYNTEC-InvoiceManager-v1.0.5.zip'
+$buildRoot = 'C:\SYNTECBuild\InvoiceManager-v1.0.6'
+$distRoot = 'C:\SYNTECBuild\dist-v1.0.6'
+$releaseZip = Join-Path $sourceRoot 'release\SYNTEC-InvoiceManager-v1.0.6.zip'
 $python = 'C:\Users\20101749\AppData\Local\Programs\Python\Python38\python.exe'
 
 Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -39,7 +39,7 @@ if (-not $ctypesPyd) { throw 'Embedded ctypes extension is missing.' }
 if ((Split-Path -Leaf $exe) -notmatch '^SYNTEC') { throw 'Executable name must start with SYNTEC.' }
 if ($version.CompanyName -notmatch 'SYNTEC') { throw 'CompanyName must include SYNTEC.' }
 if ($version.LegalCopyright -notmatch 'SYNTEC') { throw 'LegalCopyright must include SYNTEC.' }
-if ($version.FileVersion -notmatch '^1\.0\.5\.0') { throw 'Unexpected file version.' }
+if ($version.FileVersion -notmatch '^1\.0\.6\.0') { throw 'Unexpected file version.' }
 
 Remove-Item -LiteralPath $releaseZip -Force -ErrorAction SilentlyContinue
 Compress-Archive -LiteralPath $appRoot -DestinationPath $releaseZip -CompressionLevel Optimal -Force

@@ -95,6 +95,7 @@ class InvoiceDateSummary:
     toll_total: float
     lodging_amount_total: float
     lodging_tax_total: float
+    lodging_public_total: float
     lodging_total: float
     ride_hailing_interval: str
     total: float
@@ -112,6 +113,7 @@ class InvoiceOrganizeSummary:
     toll_total: float
     lodging_amount_total: float
     lodging_tax_total: float
+    lodging_public_total: float
     lodging_total: float
 
     def to_dict(self) -> dict[str, object]:

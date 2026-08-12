@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -9,6 +10,20 @@ from PyQt5.QtGui import QImage, QPainter, QTransform
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 
 from python_recognizer.types import InvoiceOrganizeResult
+
+
+# 汇总合成文件固定使用横向 A5（210 mm × 148 mm）。
+A5_WIDTH_POINTS = 595.276
+A5_HEIGHT_POINTS = 419.528
+
+
+def _print_date_sort_key(record) -> tuple[int, datetime, str, str]:
+    """按实际发生日期由远及近排列；未识别日期的票据最后打印。"""
+    try:
+        issue_date = datetime.strptime(record.issue_date, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return (1, datetime.max, record.category, record.source_file)
+    return (0, issue_date, record.category, record.source_file)
 
 
 def _pixmap_to_qimage(pixmap: fitz.Pixmap) -> QImage:
@@ -21,7 +36,7 @@ def build_print_queue(result: InvoiceOrganizeResult) -> list[Path]:
     queue: list[Path] = []
     queue.extend(build_summary_sheet_queue(result))
 
-    for record in result.records:
+    for record in sorted(result.records, key=_print_date_sort_key):
         pdf_path = Path(result.source_directory) / record.rename_target
         if not pdf_path.exists():
             continue
@@ -36,6 +51,62 @@ def build_summary_sheet_queue(result: InvoiceOrganizeResult) -> list[Path]:
         if summary_sheet.exists():
             queue.append(summary_sheet)
     return queue
+
+
+def _get_a5_page_rect(source_rect: fitz.Rect, rotation: int) -> fitz.Rect:
+    source_width, source_height = source_rect.width, source_rect.height
+    if rotation:
+        source_width, source_height = source_height, source_width
+
+    scale = min(A5_WIDTH_POINTS / source_width, A5_HEIGHT_POINTS / source_height)
+    width = source_width * scale
+    height = source_height * scale
+    left = (A5_WIDTH_POINTS - width) / 2
+    bottom = (A5_HEIGHT_POINTS - height) / 2
+    return fitz.Rect(left, bottom, left + width, bottom + height)
+
+
+def _choose_a5_rotation(source_rect: fitz.Rect) -> int:
+    normal_scale = min(A5_WIDTH_POINTS / source_rect.width, A5_HEIGHT_POINTS / source_rect.height)
+    rotated_scale = min(A5_WIDTH_POINTS / source_rect.height, A5_HEIGHT_POINTS / source_rect.width)
+    return 90 if rotated_scale > normal_scale else 0
+
+
+def export_combined_print_pdf(result: InvoiceOrganizeResult) -> Path | None:
+    """按一键打印队列生成 A5 的合成 PDF，并保留每份票据的打印份数。"""
+    queue = build_print_queue(result)
+    if not queue:
+        return None
+
+    output_path = Path(result.output_directory) / "汇总合成.pdf"
+    if output_path.exists():
+        output_path.unlink()
+
+    combined_document = fitz.open()
+    try:
+        for pdf_path in queue:
+            source_document = fitz.open(pdf_path)
+            try:
+                for page_number, source_page in enumerate(source_document):
+                    output_page = combined_document.new_page(width=A5_WIDTH_POINTS, height=A5_HEIGHT_POINTS)
+                    rotation = _choose_a5_rotation(source_page.rect)
+                    try:
+                        output_page.show_pdf_page(
+                            _get_a5_page_rect(source_page.rect, rotation),
+                            source_document,
+                            page_number,
+                            rotate=rotation,
+                        )
+                    except ValueError:
+                        # 空白页没有可导入内容，但仍应按打印页数保留为 A5 空白页。
+                        pass
+            finally:
+                source_document.close()
+        combined_document.save(str(output_path), garbage=4, deflate=True)
+    finally:
+        combined_document.close()
+
+    return output_path
 
 
 def _scaled_area(image: QImage, target_rect: QRectF) -> float:

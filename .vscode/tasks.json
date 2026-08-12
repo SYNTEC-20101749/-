@@ -157,6 +157,89 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Check GitHub CLI",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Command gh -ErrorAction Stop | Select-Object Source,Version | Format-List; gh auth status"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.6",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\build_release_v1_0_6.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Generate Invoice Manager User Manual",
+			"type": "shell",
+			"command": "C:\\Users\\20101749\\AppData\\Local\\Programs\\Python\\Python38\\python.exe",
+			"args": [
+				"${workspaceFolder}\\tools\\generate_user_manual.py"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Install User Manual Generator Dependency",
+			"type": "shell",
+			"command": "C:\\Users\\20101749\\AppData\\Local\\Programs\\Python\\Python38\\python.exe",
+			"args": [
+				"-m",
+				"pip",
+				"install",
+				"python-docx==1.1.2"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Publish Source and Tag v1.0.6",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"$ErrorActionPreference='Stop'; & \"${workspaceFolder}\\publish_v1_0_6.ps1\""
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Publish Invoice Manager v1.0.6",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\publish_v1_0_6.ps1"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
 		}
 	],
 	"inputs": [

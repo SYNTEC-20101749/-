@@ -6,6 +6,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+try:
+    from chinese_calendar import is_holiday
+except ImportError:
+    is_holiday = None
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,7 +37,6 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QInputDialog,
-    QStackedWidget,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -41,7 +45,7 @@ from PyQt5.QtWidgets import (
 )
 
 from invoice_desktop.archive import append_print_archive, get_default_archive_path
-from invoice_desktop.printing import build_print_queue, build_summary_sheet_queue, print_pdf_queue
+from invoice_desktop.printing import build_print_queue, build_summary_sheet_queue, export_combined_print_pdf, print_pdf_queue
 from python_recognizer.types import InvoiceDateSummary, InvoiceOrganizeResult, InvoiceOrganizeSummary
 from python_recognizer.workflow import (
     apply_organize_result,
@@ -56,13 +60,20 @@ WARNING_TEXT_COLOR = QColor("#8A5A00")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 VERSION_UPDATES = [
     (
-        "v1.0.5（当前版本）",
+        "v1.0.6（当前版本）",
+        [
+            "公共盘上传会包含带发票号码的票据及配套行程单，并排除汇总文件。",
+            "打印机设定与开机自启动调整为顶部“设定”菜单下的独立弹窗。",
+        ],
+    ),
+    (
+        "v1.0.5",
         [
             "新增每日网约车打车间隔统计，并写入行程单提示与归档备注。",
             "新增 Windows 开机自启动开关。",
@@ -216,29 +227,6 @@ QPushButton[feedback="true"] {
 QPushButton[feedback="true"]:hover {
     background: #d28348;
 }
-QListWidget[role="settingsNav"] {
-    min-width: 150px;
-    max-width: 190px;
-    border: 1px solid #d8cdbd;
-    border-radius: 12px;
-    background: #fffaf3;
-    padding: 6px;
-    outline: 0;
-}
-QListWidget[role="settingsNav"]::item {
-    min-height: 36px;
-    padding: 8px 12px;
-    border-radius: 10px;
-    color: #5f4832;
-    font-weight: 600;
-}
-QListWidget[role="settingsNav"]::item:hover {
-    background: #f7f0e5;
-}
-QListWidget[role="settingsNav"]::item:selected {
-    color: #ffffff;
-    background: #2f6f98;
-}
 QLineEdit {
     min-height: 38px;
     border: 1px solid #d4c7b6;
@@ -354,6 +342,7 @@ class PublicDiskUploadDialog(QDialog):
         self,
         output_directory: Path,
         initial_public_disk_address: str,
+        invoice_pdf_names: list[str],
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -369,12 +358,10 @@ class PublicDiskUploadDialog(QDialog):
         layout.addWidget(output_label)
 
         self.file_list = QListWidget()
-        for file_path in sorted(
-            path
-            for path in output_directory.iterdir()
-            if path.is_file() and not self._is_summary_pdf(path)
-        ):
-            self.file_list.addItem(file_path.name)
+        for file_name in sorted(invoice_pdf_names, key=str.casefold):
+            file_path = output_directory / file_name
+            if file_path.is_file() and file_path.suffix.lower() == ".pdf":
+                self.file_list.addItem(file_name)
         layout.addWidget(self.file_list, 1)
 
         address_label = QLabel("上传目标文件夹")
@@ -407,15 +394,11 @@ class PublicDiskUploadDialog(QDialog):
         if selected_directory:
             self.address_input.setText(selected_directory)
 
-    @staticmethod
-    def _is_summary_pdf(file_path: Path) -> bool:
-        return file_path.suffix.lower() == ".pdf" and file_path.stem == "汇总清单"
-
     def listed_pdf_files(self) -> list[Path]:
         files = []
         for row_index in range(self.file_list.count()):
             file_path = self.output_directory / self.file_list.item(row_index).text()
-            if file_path.suffix.lower() == ".pdf" and not self._is_summary_pdf(file_path):
+            if file_path.suffix.lower() == ".pdf":
                 files.append(file_path)
         return files
 
@@ -449,6 +432,7 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.settings_dialog = self._build_settings_dialog()
+        self.auto_start_settings_dialog = self._build_auto_start_settings_dialog()
         self._build_menu_bar()
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(18, 18, 18, 18)
@@ -476,6 +460,9 @@ class MainWindow(QMainWindow):
         self.printer_settings_action = QAction("打印机设定", self)
         self.printer_settings_action.triggered.connect(self.show_printer_settings)
         self.settings_menu.addAction(self.printer_settings_action)
+        self.auto_start_action = QAction("开机自启动", self)
+        self.auto_start_action.triggered.connect(self.show_auto_start_settings)
+        self.settings_menu.addAction(self.auto_start_action)
 
         self.help_menu = menu_bar.addMenu("帮助")
         self.about_action = QAction("关于 / 更新说明", self)
@@ -484,34 +471,12 @@ class MainWindow(QMainWindow):
 
     def _build_settings_dialog(self) -> QDialog:
         dialog = QDialog(self)
-        dialog.setWindowTitle("设定")
+        dialog.setWindowTitle("打印机设定")
         dialog.setModal(True)
-        dialog.resize(720, 420)
+        dialog.resize(620, 230)
 
         root_layout = QVBoxLayout(dialog)
         root_layout.setSpacing(12)
-
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(14)
-
-        self.settings_nav_list = QListWidget()
-        self.settings_nav_list.setProperty("role", "settingsNav")
-        self.settings_nav_list.addItem("打印机设定")
-        self.settings_nav_list.addItem("开机自启动")
-
-        self.settings_pages = QStackedWidget()
-        placeholder_page = QWidget()
-        placeholder_layout = QVBoxLayout(placeholder_page)
-        placeholder_layout.setContentsMargins(18, 18, 18, 18)
-        placeholder_label = QLabel("请选择左侧设定项目。")
-        placeholder_label.setProperty("role", "subtitle")
-        placeholder_layout.addWidget(placeholder_label)
-        placeholder_layout.addStretch(1)
-        self.settings_pages.addWidget(placeholder_page)
-
-        printer_page = QWidget()
-        printer_page_layout = QVBoxLayout(printer_page)
-        printer_page_layout.setContentsMargins(0, 0, 0, 0)
         printer_group = QGroupBox("打印机设定")
         printer_layout = QVBoxLayout(printer_group)
         printer_layout.setSpacing(10)
@@ -530,13 +495,22 @@ class MainWindow(QMainWindow):
         printer_row.addWidget(self.printer_button)
         printer_row.addWidget(self.printer_status_label, 1)
         printer_layout.addLayout(printer_row)
-        printer_page_layout.addWidget(printer_group)
-        printer_page_layout.addStretch(1)
-        self.settings_pages.addWidget(printer_page)
+        root_layout.addWidget(printer_group)
+        root_layout.addStretch(1)
 
-        auto_start_page = QWidget()
-        auto_start_page_layout = QVBoxLayout(auto_start_page)
-        auto_start_page_layout.setContentsMargins(0, 0, 0, 0)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        root_layout.addWidget(close_button, 0, Qt.AlignRight)
+        return dialog
+
+    def _build_auto_start_settings_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("开机自启动")
+        dialog.setModal(True)
+        dialog.resize(620, 230)
+
+        root_layout = QVBoxLayout(dialog)
+        root_layout.setSpacing(12)
         auto_start_group = QGroupBox("开机自启动")
         auto_start_layout = QVBoxLayout(auto_start_group)
         auto_start_layout.setSpacing(10)
@@ -547,38 +521,19 @@ class MainWindow(QMainWindow):
         self.auto_start_checkbox.setChecked(self._is_auto_start_enabled())
         self.auto_start_checkbox.toggled.connect(self.set_auto_start_enabled)
         auto_start_layout.addWidget(self.auto_start_checkbox)
-        auto_start_page_layout.addWidget(auto_start_group)
-        auto_start_page_layout.addStretch(1)
-        self.settings_pages.addWidget(auto_start_page)
-
-        self.settings_nav_list.currentRowChanged.connect(self._on_settings_option_changed)
-        content_layout.addWidget(self.settings_nav_list)
-        content_layout.addWidget(self.settings_pages, 1)
-        root_layout.addLayout(content_layout, 1)
+        root_layout.addWidget(auto_start_group)
+        root_layout.addStretch(1)
 
         close_button = QPushButton("关闭")
         close_button.clicked.connect(dialog.accept)
         root_layout.addWidget(close_button, 0, Qt.AlignRight)
         return dialog
 
-    def _on_settings_option_changed(self, row_index: int) -> None:
-        if row_index < 0:
-            self.settings_pages.setCurrentIndex(0)
-            return
-        self.settings_pages.setCurrentIndex(row_index + 1)
-
-    def show_settings(self) -> None:
-        self.settings_nav_list.clearSelection()
-        self.settings_nav_list.setCurrentRow(-1)
-        self.settings_pages.setCurrentIndex(0)
-        self.settings_dialog.exec_()
-
-    def _select_printer_settings_page(self) -> None:
-        self.settings_nav_list.setCurrentRow(0)
-
     def show_printer_settings(self) -> None:
-        self._select_printer_settings_page()
         self.settings_dialog.exec_()
+
+    def show_auto_start_settings(self) -> None:
+        self.auto_start_settings_dialog.exec_()
 
     @staticmethod
     def _auto_start_command() -> str:
@@ -619,13 +574,17 @@ class MainWindow(QMainWindow):
                     except FileNotFoundError:
                         pass
         except OSError as error:
-            self.auto_start_checkbox.blockSignals(True)
-            self.auto_start_checkbox.setChecked(not enabled)
-            self.auto_start_checkbox.blockSignals(False)
+            self._sync_auto_start_controls(not enabled)
             QMessageBox.critical(self, "设置失败", f"无法更新开机自启动设置：\n{error}")
             return
 
+        self._sync_auto_start_controls(enabled)
         self.status_bar.showMessage("已开启开机自启动。" if enabled else "已关闭开机自启动。")
+
+    def _sync_auto_start_controls(self, enabled: bool) -> None:
+        self.auto_start_checkbox.blockSignals(True)
+        self.auto_start_checkbox.setChecked(enabled)
+        self.auto_start_checkbox.blockSignals(False)
 
     def _build_header(self) -> QWidget:
         container = QWidget()
@@ -643,7 +602,6 @@ class MainWindow(QMainWindow):
         self.reimbursement_reminder_opacity.setOpacity(1.0)
         self.reimbursement_reminder_label.setGraphicsEffect(self.reimbursement_reminder_opacity)
         self._update_reimbursement_reminder()
-        self.reminder_blink_timer.start()
         layout.addWidget(title)
         layout.addWidget(subtitle)
         layout.addWidget(self.reimbursement_reminder_label)
@@ -669,7 +627,8 @@ class MainWindow(QMainWindow):
         current_date = datetime.now().date()
         start_date, deadline = self._get_reimbursement_period(current_date)
         remaining_days = (deadline - current_date).days
-        background_role = "reimbursementReminderCritical" if remaining_days <= 10 else "reimbursementReminder"
+        should_blink = remaining_days <= 10
+        background_role = "reimbursementReminderCritical" if should_blink else "reimbursementReminder"
         self.reimbursement_reminder_label.setProperty("role", background_role)
         self.reimbursement_reminder_label.setText(
             f"报销周期：{start_date:%Y年%m月%d日} 至 {deadline:%Y年%m月%d日}　"
@@ -679,8 +638,17 @@ class MainWindow(QMainWindow):
         )
         self.reimbursement_reminder_label.style().unpolish(self.reimbursement_reminder_label)
         self.reimbursement_reminder_label.style().polish(self.reimbursement_reminder_label)
+        self.reminder_blink_state = True
+        self.reimbursement_reminder_opacity.setOpacity(1.0)
+        if should_blink:
+            self.reminder_blink_timer.start()
+        else:
+            self.reminder_blink_timer.stop()
 
     def _toggle_reimbursement_reminder(self) -> None:
+        if self.reimbursement_reminder_label.property("role") != "reimbursementReminderCritical":
+            self.reimbursement_reminder_opacity.setOpacity(1.0)
+            return
         self.reminder_blink_state = not self.reminder_blink_state
         self.reimbursement_reminder_opacity.setOpacity(1.0 if self.reminder_blink_state else 0.35)
 
@@ -806,11 +774,11 @@ class MainWindow(QMainWindow):
         group = QGroupBox("按日期汇总")
         layout = QVBoxLayout(group)
 
-        self.date_table = QTableWidget(0, 9)
+        self.date_table = QTableWidget(0, 10)
         self.date_table.setHorizontalHeaderLabels(
-            ["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿合计", "在途", "出差补贴"]
+            ["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴"]
         )
-        self.date_table.horizontalHeaderItem(8).setForeground(QBrush(SUBSIDY_HEADER_COLOR))
+        self.date_table.horizontalHeaderItem(9).setForeground(QBrush(SUBSIDY_HEADER_COLOR))
         self.date_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed)
         self.date_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.date_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -844,10 +812,11 @@ class MainWindow(QMainWindow):
         group = QGroupBox("发票明细")
         layout = QVBoxLayout(group)
 
-        self.table = QTableWidget(0, 13)
+        self.table = QTableWidget(0, 14)
         self.table.setHorizontalHeaderLabels(
             [
                 "日期",
+                "假别",
                 "类别",
                 "总额",
                 "金额",
@@ -869,9 +838,9 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_column_widths = [90, 78, 72, 72, 72, 150, 135, 170, 170, 62, 90, 90, 150]
-        self._detail_column_min_widths = [76, 64, 62, 62, 62, 110, 100, 110, 110, 52, 72, 72, 90]
-        self._detail_flexible_columns = (5, 7, 8, 12)
+        self._detail_column_widths = [90, 62, 78, 72, 72, 72, 150, 135, 170, 170, 62, 90, 90, 150]
+        self._detail_column_min_widths = [76, 54, 64, 62, 62, 62, 110, 100, 110, 110, 52, 72, 72, 90]
+        self._detail_flexible_columns = (6, 8, 9, 13)
         self._adapt_detail_table_columns()
         layout.addWidget(self.table)
         return group
@@ -970,7 +939,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输出目录不存在", f"暂未找到输出目录：\n{output_directory}")
             return
 
-        dialog = PublicDiskUploadDialog(output_directory, self._load_public_disk_upload_directory(), self)
+        invoice_numbers = {record.number for record in self.current_result.records if record.number}
+        invoice_pdf_names = [
+            file_path.name
+            for file_path in output_directory.iterdir()
+            if (
+                file_path.is_file()
+                and file_path.suffix.lower() == ".pdf"
+                and any(invoice_number in file_path.name for invoice_number in invoice_numbers)
+            )
+        ]
+        dialog = PublicDiskUploadDialog(
+            output_directory,
+            self._load_public_disk_upload_directory(),
+            invoice_pdf_names,
+            self,
+        )
         if dialog.exec_() != QDialog.Accepted:
             self.status_bar.showMessage("已取消上传到局域公共盘。")
             return
@@ -1418,6 +1402,7 @@ class MainWindow(QMainWindow):
                 f"{item.toll_total:.2f}",
                 f"{item.lodging_amount_total:.2f}",
                 f"{item.lodging_tax_total:.2f}",
+                f"{item.lodging_public_total:.2f}",
                 f"{item.lodging_total:.2f}",
                 travel_in_transit,
                 f"{subsidy_amount:.2f}" if subsidy_amount else "",
@@ -1448,7 +1433,7 @@ class MainWindow(QMainWindow):
         self._refresh_date_totals()
 
     def _build_empty_manual_row_values(self) -> list[str]:
-        return [datetime.now().strftime("%Y-%m-%d"), "", "", "", "", "", "", "", ""]
+        return [datetime.now().strftime("%Y-%m-%d"), "", "", "", "", "", "", "", "", ""]
 
     def _focus_first_manual_cell(self) -> None:
         if self._date_data_row_count() == 0:
@@ -1471,8 +1456,8 @@ class MainWindow(QMainWindow):
 
     def _is_date_table_column_editable(self, column_index: int) -> bool:
         if self.manual_summary_mode:
-            return 0 <= column_index <= 8
-        return column_index in {2, 7, 8}
+            return 0 <= column_index <= 9
+        return column_index in {2, 8, 9}
 
     def _date_data_row_count(self) -> int:
         return max(self.date_table.rowCount() - 2, 0)
@@ -1493,13 +1478,13 @@ class MainWindow(QMainWindow):
         values: dict[str, tuple[str, float, float]] = {}
         for row_index in range(self._date_data_row_count()):
             date_item = self.date_table.item(row_index, 0)
-            travel_item = self.date_table.item(row_index, 7)
+            travel_item = self.date_table.item(row_index, 8)
             if date_item is None:
                 continue
             issue_date = date_item.text().strip()
             travel_in_transit = travel_item.text().strip() if travel_item is not None else ""
             taxi_amount = self._parse_date_table_money(row_index, 2)
-            subsidy_amount = self._parse_date_table_money(row_index, 8)
+            subsidy_amount = self._parse_date_table_money(row_index, 9)
             existing_travel, existing_taxi, existing_subsidy = values.get(issue_date, ("", 0.0, 0.0))
             combined_travel = "；".join(part for part in [existing_travel, travel_in_transit] if part)
             values[issue_date] = (
@@ -1521,15 +1506,15 @@ class MainWindow(QMainWindow):
         total_row = data_row_count + 1
         money_totals = [
             round(sum(self._parse_date_table_money(row_index, column_index) for row_index in range(data_row_count)), 2)
-            for column_index in [1, 2, 3, 4, 5, 6, 8]
+            for column_index in [1, 2, 3, 4, 5, 6, 7, 9]
         ]
         in_transit_total = round(
-            sum(parse_money_text(self.date_table.item(row_index, 7).text()) for row_index in range(data_row_count) if self.date_table.item(row_index, 7) is not None),
+            sum(parse_money_text(self.date_table.item(row_index, 8).text()) for row_index in range(data_row_count) if self.date_table.item(row_index, 8) is not None),
             2,
         )
         transport_subtotal = round(money_totals[0] + money_totals[1], 2)
-        combined_subsidy_total = round(in_transit_total + money_totals[6], 2)
-        grand_total = round(transport_subtotal + money_totals[2] + money_totals[5] + combined_subsidy_total, 2)
+        combined_subsidy_total = round(in_transit_total + money_totals[7], 2)
+        grand_total = round(transport_subtotal + money_totals[2] + money_totals[6] + combined_subsidy_total, 2)
 
         subtotal_values = [
             "小计",
@@ -1539,10 +1524,11 @@ class MainWindow(QMainWindow):
             f"{money_totals[3]:.2f}",
             f"{money_totals[4]:.2f}",
             f"{money_totals[5]:.2f}",
+            f"{money_totals[6]:.2f}",
             "",
             f"{combined_subsidy_total:.2f}",
         ]
-        total_values = ["总计", f"{grand_total:.2f}", "", "", "", "", "", "", ""]
+        total_values = ["总计", f"{grand_total:.2f}", "", "", "", "", "", "", "", ""]
 
         for column_index, value in enumerate(subtotal_values):
             self.date_table.setItem(subtotal_row, column_index, self._build_date_table_item(value, editable=False, summary=True))
@@ -1559,7 +1545,7 @@ class MainWindow(QMainWindow):
     def _on_date_table_cell_changed(self, row_index: int, column_index: int) -> None:
         if self.updating_date_table or row_index >= self._date_data_row_count():
             return
-        if not self.manual_summary_mode and column_index not in {2, 7, 8}:
+        if not self.manual_summary_mode and column_index not in {2, 8, 9}:
             return
         self._refresh_date_totals()
         if self.manual_summary_mode:
@@ -1569,11 +1555,12 @@ class MainWindow(QMainWindow):
 
     def _fill_table(self, result: InvoiceOrganizeResult) -> None:
         self.table.setRowCount(len(result.records))
-        self.table.horizontalHeaderItem(8).setText("重命名文件名" if result.applied else "目标文件名")
+        self.table.horizontalHeaderItem(9).setText("重命名文件名" if result.applied else "目标文件名")
 
         for row_index, record in enumerate(result.records):
             values = [
                 record.issue_date or "未识别日期",
+                self._get_day_type(record.issue_date),
                 record.category,
                 f"{record.total_amount:.2f}",
                 f"{record.amount:.2f}",
@@ -1613,6 +1600,20 @@ class MainWindow(QMainWindow):
         self.table.resizeRowsToContents()
         for row_index in range(self.table.rowCount()):
             self.table.setRowHeight(row_index, max(self.table.rowHeight(row_index), 32))
+
+    @staticmethod
+    def _get_day_type(issue_date: str) -> str:
+        """按周末及中国法定节假日标记明细行的假别。"""
+        try:
+            actual_date = datetime.strptime(issue_date, "%Y-%m-%d").date()
+        except ValueError:
+            return "未识别"
+
+        if actual_date.weekday() >= 5:
+            return "假日"
+        if is_holiday is not None and is_holiday(actual_date):
+            return "假日"
+        return "平日"
 
     def _get_subsidy_amount(self) -> float:
         self._sync_date_manual_values()
@@ -1654,9 +1655,10 @@ class MainWindow(QMainWindow):
                     "toll_total": self._parse_date_table_money(row_index, 3),
                     "lodging_amount_total": self._parse_date_table_money(row_index, 4),
                     "lodging_tax_total": self._parse_date_table_money(row_index, 5),
-                    "lodging_total": self._parse_date_table_money(row_index, 6),
-                    "travel_in_transit": text_values[7],
-                    "subsidy_amount": self._parse_date_table_money(row_index, 8),
+                    "lodging_public_total": self._parse_date_table_money(row_index, 6),
+                    "lodging_total": self._parse_date_table_money(row_index, 7),
+                    "travel_in_transit": text_values[8],
+                    "subsidy_amount": self._parse_date_table_money(row_index, 9),
                 }
             )
         return rows
@@ -1672,6 +1674,7 @@ class MainWindow(QMainWindow):
                     "toll_total": 0.0,
                     "lodging_amount_total": 0.0,
                     "lodging_tax_total": 0.0,
+                    "lodging_public_total": 0.0,
                     "lodging_total": 0.0,
                 },
             )
@@ -1679,6 +1682,7 @@ class MainWindow(QMainWindow):
             bucket["toll_total"] += float(row["toll_total"])
             bucket["lodging_amount_total"] += float(row["lodging_amount_total"])
             bucket["lodging_tax_total"] += float(row["lodging_tax_total"])
+            bucket["lodging_public_total"] += float(row["lodging_public_total"])
             bucket["lodging_total"] += float(row["lodging_total"])
 
         daily_breakdown = [
@@ -1688,6 +1692,7 @@ class MainWindow(QMainWindow):
                 toll_total=round(bucket["toll_total"], 2),
                 lodging_amount_total=round(bucket["lodging_amount_total"], 2),
                 lodging_tax_total=round(bucket["lodging_tax_total"], 2),
+                lodging_public_total=round(bucket["lodging_public_total"], 2),
                 lodging_total=round(bucket["lodging_total"], 2),
                 ride_hailing_interval="",
                 total=round(bucket["transport_total"] + bucket["toll_total"] + bucket["lodging_total"], 2),
@@ -1702,6 +1707,7 @@ class MainWindow(QMainWindow):
             toll_total=round(sum(bucket["toll_total"] for bucket in grouped_rows.values()), 2),
             lodging_amount_total=round(sum(bucket["lodging_amount_total"] for bucket in grouped_rows.values()), 2),
             lodging_tax_total=round(sum(bucket["lodging_tax_total"] for bucket in grouped_rows.values()), 2),
+            lodging_public_total=round(sum(bucket["lodging_public_total"] for bucket in grouped_rows.values()), 2),
             lodging_total=round(sum(bucket["lodging_total"] for bucket in grouped_rows.values()), 2),
             daily_breakdown=daily_breakdown,
         )
@@ -1730,6 +1736,7 @@ class MainWindow(QMainWindow):
             travel_in_transit=self._get_travel_in_transit(),
             daily_manual_values=self.date_manual_values,
         )
+        export_combined_print_pdf(self.current_result)
 
 def main() -> int:
     app = QApplication(sys.argv)

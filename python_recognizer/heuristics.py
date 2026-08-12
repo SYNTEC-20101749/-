@@ -6,7 +6,7 @@ from typing import Optional
 
 from .types import InvoiceRecognitionResult
 
-MONEY_PATTERN = r"([0-9][0-9,\s]*(?:\.[0-9]{1,2})?)"
+MONEY_PATTERN = r"([0-9][0-9,\s]*(?:\s*\.\s*[0-9]{1,2})?)"
 EXPECTED_BUYER_TAX_ID = "91320594688334374M"
 
 
@@ -61,20 +61,20 @@ def extract_train_ticket_fare(text: str) -> tuple[float, str]:
         (
             "车次+座席邻近金额",
             re.compile(
-                r"\b[gdcztk]\d{1,4}\b[\s\S]{0,80}?(?:一等座|二等座|商务座|软卧|硬卧|硬座|无座|座)\s*[:：]?\s*([0-9]+(?:\.[0-9]{1,2})?)",
+                r"\b[gdcztk]\d{1,4}\b[\s\S]{0,80}?(?:一等座|二等座|商务座|软卧|硬卧|硬座|无座|座)\s*[:：]?\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)",
                 re.IGNORECASE,
             ),
         ),
         (
             "座位号后冒号金额",
             re.compile(
-                r"\b\d{1,2}[A-F]\b\s*[:：]\s*([0-9]+(?:\.[0-9]{1,2})?)\s+(?:\d{6,}\*{2,}\d{4}|\d{18}|\d{17}[\dxX])",
+                r"\b\d{1,2}[A-F]\b\s*[:：]\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)\s+(?:\d{6,}\*{2,}\d{4}|\d{18}|\d{17}[\dxX])",
             ),
         ),
         (
             "时间后冒号金额",
             re.compile(
-                r"\b\d{2}:\d{2}\b[\s\S]{0,40}?[:：]\s*([0-9]+(?:\.[0-9]{1,2})?)\s+(?:\d{6,}\*{2,}\d{4}|\d{18}|\d{17}[\dxX])",
+                r"\b\d{2}:\d{2}\b[\s\S]{0,40}?[:：]\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)\s+(?:\d{6,}\*{2,}\d{4}|\d{18}|\d{17}[\dxX])",
             ),
         ),
     ]
@@ -167,11 +167,11 @@ def extract_toll_trip_date(text: str) -> tuple[str, str]:
     patterns = [
         (
             "通行日期字段",
-            re.compile(r"(?:通行日期|通行时间|交易日期|驶入时间|驶出时间)\s*[:：]?\s*(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)"),
+            re.compile(r"(?:通行日期(?:起|止)?|通行时间(?:起|止)?|交易日期|驶入时间|驶出时间)\s*[:：]?\s*(20\d{2}(?:[-/.年]\d{1,2}[-/.月]\d{1,2}日?|\d{4}))"),
         ),
         (
             "通行时间表格日期",
-            re.compile(r"(?:通行日期|通行时间|交易日期)[\s\S]{0,80}?(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)\s+\d{1,2}:\d{2}"),
+            re.compile(r"(?:通行日期(?:起|止)?|通行时间(?:起|止)?|交易日期)[\s\S]{0,80}?(20\d{2}(?:[-/.年]\d{1,2}[-/.月]\d{1,2}日?|\d{4}))\s+\d{1,2}:\d{2}"),
         ),
     ]
 
@@ -183,6 +183,61 @@ def extract_toll_trip_date(text: str) -> tuple[str, str]:
                 return trip_date, label
 
     return "", "未命中"
+
+
+def extract_toll_line_amounts(text: str) -> tuple[float, float, str] | None:
+    """从高速票的项目明细行提取不含税金额和税额。
+
+    高速票常见为“经营租赁*通行费 0.72 3% 0.02”。当 OCR 漏读“价税合计”
+    标签或货币符号时，仍可据此计算价税合计。
+    """
+    item_match = re.search(
+        r"(?:经营租赁\s*\*?\s*通行费|车辆通行服务|收费公路通行费|\*?通行费\*?)([\s\S]{0,240})",
+        text,
+        re.IGNORECASE,
+    )
+    if not item_match:
+        return None
+
+    item_text = item_match.group(1)
+    tax_rate_match = re.search(r"\d+(?:\s*\.\s*\d+)?\s*%", item_text)
+    if not tax_rate_match:
+        return None
+
+    amount_values = [
+        parse_numeric_value(match.group(0))
+        for match in re.finditer(r"\d+\s*\.\s*\d{1,2}", item_text[:tax_rate_match.start()])
+    ]
+    tax_values = [
+        parse_numeric_value(match.group(0))
+        for match in re.finditer(r"\d+\s*\.\s*\d{1,2}", item_text[tax_rate_match.end():])
+    ]
+    upper_bound = get_money_upper_bound("高速通行票")
+    amount = next((value for value in reversed(amount_values) if 0 < value <= upper_bound), 0.0)
+    tax_amount = next((value for value in tax_values if 0 <= value <= upper_bound), 0.0)
+    if amount <= 0 or tax_amount < 0:
+        return None
+
+    return amount, tax_amount, "高速通行费项目行金额税额"
+
+
+def reconcile_amounts(
+    total_amount: float,
+    amount: float,
+    tax_amount: float,
+    category: str,
+) -> tuple[float, float, float, bool]:
+    """根据金额加税额校验价税合计，修正 OCR 遗漏的小数尾数。"""
+    if amount <= 0 or tax_amount < 0 or tax_amount > amount * 0.25:
+        return total_amount, amount, tax_amount, False
+
+    calculated_total = round(amount + tax_amount, 2)
+    if calculated_total <= 0 or calculated_total > get_money_upper_bound(category):
+        return total_amount, amount, tax_amount, False
+
+    if not approximately_equal(total_amount, calculated_total):
+        return calculated_total, amount, tax_amount, True
+    return total_amount, amount, tax_amount, False
 
 
 def extract_lodging_line_amounts(text: str) -> tuple[float, float, str] | None:
@@ -243,6 +298,11 @@ def extract_ride_itinerary_amounts(text: str) -> tuple[float, float, float, str]
 
 
 def normalize_date_value(value: str) -> str:
+    compact_match = re.fullmatch(r"(20\d{2})(\d{2})(\d{2})", value.strip())
+    if compact_match:
+        year, month, day = (int(part) for part in compact_match.groups())
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
     date_parts = re.findall(r"\d+", value)
     if len(date_parts) < 3:
         return ""
@@ -305,7 +365,7 @@ def derive_invoice_category(text: str, attachment_name: str, vendor: str) -> str
         (re.compile(r"(火车票|铁路电子客票|铁路车票|电子客票|高铁|动车|铁路|国内旅客运输服务|12306|95306|\b[gdcztk]\d{1,4}\b|一等座|二等座|商务座)", re.IGNORECASE), "火车票"),
         (re.compile(r"(网约车|滴滴|出行服务|出租汽车|出租车|打车|客运服务|代驾|出行人|出发地|到达地|交通工具类型|行程起点|行程终点|里程费|时长费)", re.IGNORECASE), "网约车"),
         (re.compile(r"(住宿|酒店|宾馆|旅店|客房|房费|住宿服务)", re.IGNORECASE), "住宿票"),
-        (re.compile(r"(通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务)", re.IGNORECASE), "高速通行票"),
+        (re.compile(r"(通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务|通行日期起|经营租赁\*?通行费)", re.IGNORECASE), "高速通行票"),
         (re.compile(r"(航空运输电子客票|机票|航班|航空公司|民航|航空运输服务)", re.IGNORECASE), "机票"),
         (re.compile(r"(餐饮|餐费|饭店|餐厅|美食)", re.IGNORECASE), "餐饮"),
         (re.compile(r"(加油|燃油|石油|石化)", re.IGNORECASE), "加油票"),
@@ -408,9 +468,9 @@ def extract_buyer_tax_id(text: str) -> str:
 def derive_lodging_invoice_type(text: str, category: str) -> str:
     if category != "住宿票":
         return ""
-    if re.search(r"(?:增值税)?专用发票|专票", text, re.IGNORECASE):
+    if re.search(r"(?:增值税)?\s*专\s*用\s*发\s*票|专\s*票", text, re.IGNORECASE):
         return "专票"
-    if re.search(r"(?:增值税)?普通发票|电子普通发票|普票", text, re.IGNORECASE):
+    if re.search(r"(?:增值税)?\s*(?:电子)?\s*普\s*通\s*发\s*票|普\s*票", text, re.IGNORECASE):
         return "普票"
     return "待核验"
 
@@ -444,6 +504,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     date_match = re.search(r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", compact_text)
     fallback_year = int(re.search(r"20\d{2}", date_match.group(1)).group()) if date_match else None
     lodging_line_amounts = extract_lodging_line_amounts(compact_text)
+    toll_line_amounts = extract_toll_line_amounts(compact_text)
     ride_itinerary_amounts = extract_ride_itinerary_amounts(compact_text)
     ride_itinerary_trip_date, ride_itinerary_trip_date_rule = extract_ride_itinerary_trip_date(compact_text)
     ride_start_time, ride_end_time = extract_ride_trip_times(compact_text)
@@ -486,17 +547,23 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     )
 
     if lodging_line_amounts:
-        amount = amount or lodging_line_amounts[0]
-        tax_amount = tax_amount or lodging_line_amounts[1]
-        if amount_rule == "未命中":
-            amount_rule = lodging_line_amounts[2]
-        if tax_rule == "未命中":
-            tax_rule = lodging_line_amounts[2]
+        amount = lodging_line_amounts[0]
+        tax_amount = lodging_line_amounts[1]
+        amount_rule = lodging_line_amounts[2]
+        tax_rule = lodging_line_amounts[2]
 
     vendor = extract_vendor_name(compact_text, source_file)
     category = derive_invoice_category(compact_text, source_file, vendor)
     buyer_tax_id = extract_buyer_tax_id(compact_text)
     lodging_invoice_type = derive_lodging_invoice_type(compact_text, category)
+
+    if toll_line_amounts and category == "高速通行票":
+        amount = toll_line_amounts[0]
+        tax_amount = toll_line_amounts[1]
+        total_amount = round(amount + tax_amount, 2)
+        amount_rule = toll_line_amounts[2]
+        tax_rule = toll_line_amounts[2]
+        total_rule = "高速通行费金额加税额推导"
 
     if ride_itinerary_amounts and category == "网约车行程单":
         total_amount = total_amount or ride_itinerary_amounts[0]
@@ -510,6 +577,9 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     total_amount = sanitize_money_value(total_amount, category)
     tax_amount = sanitize_money_value(tax_amount, category)
     amount = sanitize_money_value(amount, category)
+    total_amount, amount, tax_amount, total_corrected = reconcile_amounts(total_amount, amount, tax_amount, category)
+    if total_corrected:
+        total_rule = "金额加税额一致性校正"
     currency_candidates = [
         candidate
         for candidate in extract_currency_candidates(compact_text)

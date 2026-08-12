@@ -18,6 +18,19 @@ RIDE_HAILING_FILENAME_PATTERN = re.compile(
 )
 
 
+def iter_source_pdf_files(directory: str | Path) -> list[Path]:
+    """递归获取源 PDF，排除本软件生成的重命名输出目录及其内容。"""
+    base_path = Path(directory)
+    output_directory = base_path / f"{base_path.name}-NewName"
+    files: list[Path] = []
+    for file_path in base_path.rglob("*.pdf"):
+        try:
+            file_path.relative_to(output_directory)
+        except ValueError:
+            files.append(file_path)
+    return sorted(files)
+
+
 def infer_doc_type(file_name: str, category: str) -> str:
     if "行程单" in file_name or category == "网约车行程单":
         return "itinerary"
@@ -86,7 +99,7 @@ def pair_ride_hailing_documents(directory: str | Path, *, enable_ocr: bool = Fal
 
     candidates = [
         candidate
-        for file_path in sorted(base_path.glob("*.pdf"))
+        for file_path in iter_source_pdf_files(base_path)
         for candidate in [build_ride_hailing_candidate(file_path, enable_ocr=enable_ocr)]
         if candidate is not None
     ]
