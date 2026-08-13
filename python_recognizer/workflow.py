@@ -26,6 +26,11 @@ TRANSPORT_CATEGORIES = {"网约车", "火车票"}
 TOLL_CATEGORIES = {"高速通行票"}
 LODGING_CATEGORIES = {"住宿票"}
 UNKNOWN_DATE_LABEL = "未识别日期"
+SUMMARY_ISSUE_COLUMNS = {
+    "网约车": ("transport_total",),
+    "火车票": ("transport_total",),
+    "高速通行票": ("toll_total",),
+}
 
 
 def format_money(value: float) -> str:
@@ -57,6 +62,39 @@ def calculate_summary_total(
         + in_transit_amount,
         2,
     )
+
+
+def collect_summary_issues(result: InvoiceOrganizeResult) -> tuple[dict[tuple[str, str], list[str]], list[str]]:
+    """将问题明细映射到按日期汇总的费用栏位，并保留无法映射的异常。"""
+    issues_by_cell: dict[tuple[str, str], list[str]] = defaultdict(list)
+    unassigned_issues: list[str] = []
+
+    for record in result.records:
+        if record.review_status == "ok" and not record.warnings:
+            continue
+
+        identifier = record.number or record.source_file
+        reasons = record.warnings or ["需人工复核"]
+        issue_text = f"{record.category}（{identifier}）：{'；'.join(reasons)}"
+        date_value = record.issue_date or UNKNOWN_DATE_LABEL
+        column_keys = SUMMARY_ISSUE_COLUMNS.get(record.category, ())
+        if record.category == "住宿票":
+            column_keys = (
+                ("lodging_public_total",)
+                if record.lodging_invoice_type == "普票"
+                else ("lodging_amount_total", "lodging_tax_total")
+            )
+
+        if not column_keys:
+            unassigned_issues.append(issue_text)
+            continue
+
+        for column_key in column_keys:
+            cell_issues = issues_by_cell[(date_value, column_key)]
+            if issue_text not in cell_issues:
+                cell_issues.append(issue_text)
+
+    return issues_by_cell, unassigned_issues
 
 
 def _parse_issue_date(actual_date: str) -> tuple[int, str]:
@@ -166,7 +204,7 @@ def build_rename_target(
     date_part = issue_date or "未识别日期"
     amount_part = format_money(total_amount)
 
-    if category == "网约车行程单" and stem_number:
+    if category in {"网约车行程单", "高速通行费行程单"} and stem_number:
         return str(Path(output_folder_name) / f"{stem_number}-{amount_part}行程单.pdf")
 
     if stem_number:
@@ -249,7 +287,7 @@ def build_review_warnings(
     lodging_invoice_type: str,
 ) -> list[str]:
     warnings: list[str] = []
-    if not number and category not in {"网约车行程单", "火车票"}:
+    if not number and category not in {"网约车行程单", "高速通行费行程单", "火车票"}:
         warnings.append("缺少发票号码")
     if total_amount <= 0:
         warnings.append("总金额未识别")
@@ -397,7 +435,8 @@ def export_summary_sheet(
     )
 
     manual_values = daily_manual_values or {}
-    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴", "备注"]]
+    summary_issues, unassigned_issues = collect_summary_issues(result)
+    daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿费", "税金", "在途", "出差补贴", "备注"]]
     subsidy_total = 0.0
     taxi_total = 0.0
     in_transit_total = 0.0
@@ -406,19 +445,21 @@ def export_summary_sheet(
         taxi_total += item_taxi_amount
         subsidy_total += item_subsidy_amount
         in_transit_total += parse_money_text(item_travel_in_transit)
+        note_parts = [item.ride_hailing_interval]
+        for column_key in ("transport_total", "toll_total", "lodging_amount_total", "lodging_tax_total", "lodging_public_total"):
+            note_parts.extend(summary_issues.get((item.issue_date, column_key), []))
+        lodging_fee = item.lodging_amount_total + item.lodging_public_total
         daily_rows.append(
             [
                 item.issue_date,
                 format_money(item.transport_total),
                 format_money(item_taxi_amount) if item_taxi_amount else "",
                 format_money(item.toll_total),
-                format_money(item.lodging_amount_total),
+                format_money(lodging_fee),
                 format_money(item.lodging_tax_total),
-                format_money(item.lodging_public_total),
-                format_money(item.lodging_total),
                 item_travel_in_transit,
                 format_money(item_subsidy_amount) if item_subsidy_amount else "",
-                item.ride_hailing_interval,
+                "；".join(part for part in note_parts if part),
             ]
         )
     daily_rows.append(
@@ -427,10 +468,8 @@ def export_summary_sheet(
             format_money(result.summary.transport_total + taxi_total),
             format_money(taxi_total),
             format_money(result.summary.toll_total),
-            format_money(result.summary.lodging_amount_total),
+            format_money(result.summary.lodging_amount_total + result.summary.lodging_public_total),
             format_money(result.summary.lodging_tax_total),
-            format_money(result.summary.lodging_public_total),
-            format_money(result.summary.lodging_total),
             "",
             format_money(subsidy_total + in_transit_total),
             "",
@@ -438,7 +477,7 @@ def export_summary_sheet(
     )
     effective_taxi_amount = taxi_amount if taxi_amount else taxi_total
     effective_in_transit_amount = in_transit_total
-    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", "", "", ""])
+    daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", ""])
     subtotal_row_index = len(result.summary.daily_breakdown) + 1
 
     daily_table_style = _build_table_style()
@@ -452,6 +491,21 @@ def export_summary_sheet(
     daily_table_style.add("TEXTCOLOR", (1, subtotal_row_index), (1, subtotal_row_index), colors.HexColor("#8A4B12"))
     daily_table_style.add("FONTNAME", (1, subtotal_row_index), (1, subtotal_row_index), "STSong-Light")
     daily_table_style.add("FONTSIZE", (1, subtotal_row_index), (1, subtotal_row_index), 8.5)
+    summary_column_indexes = {
+        "transport_total": 1,
+        "toll_total": 3,
+        "lodging_amount_total": 4,
+        "lodging_tax_total": 5,
+        "lodging_public_total": 4,
+    }
+    for row_index, item in enumerate(result.summary.daily_breakdown, start=1):
+        for column_key, column_index in summary_column_indexes.items():
+            if summary_issues.get((item.issue_date, column_key)):
+                daily_table_style.add("BACKGROUND", (column_index, row_index), (column_index, row_index), colors.HexColor("#FCE4D6"))
+                daily_table_style.add("TEXTCOLOR", (column_index, row_index), (column_index, row_index), colors.HexColor("#C62828"))
+                daily_table_style.add("FONTNAME", (column_index, row_index), (column_index, row_index), "STSong-Light")
+    if unassigned_issues:
+        daily_rows[-2][-1] = "；".join(["未归类异常", *unassigned_issues])
 
     checklist_rows = [
         ["□ 填写TQM报销"],
@@ -468,7 +522,7 @@ def export_summary_sheet(
         Spacer(1, 10),
         Table(
             wrapped_daily_rows,
-            colWidths=[36, 43, 43, 36, 47, 42, 52, 47, 40, 43, 48],
+            colWidths=[42, 48, 48, 42, 48, 42, 42, 48, 96],
             repeatRows=1,
             style=daily_table_style,
         ),

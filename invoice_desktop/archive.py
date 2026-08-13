@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
+from openpyxl.styles import Font, PatternFill
 
 from python_recognizer.types import InvoiceOrganizeResult
-from python_recognizer.workflow import build_trip_summary_title, calculate_summary_total
+from python_recognizer.workflow import build_trip_summary_title, calculate_summary_total, collect_summary_issues
 
 
 ARCHIVE_HEADERS = [
@@ -25,6 +27,7 @@ ARCHIVE_HEADERS = [
     "出差补贴",
     "总计",
     "备注",
+    "异常提示",
 ]
 
 
@@ -102,6 +105,12 @@ def append_print_archive(
         target_path.unlink()
     workbook, worksheet = _ensure_workbook(target_path, ARCHIVE_HEADERS)
     start_date, end_date = _get_trip_date_range(result)
+    summary_issues, unassigned_issues = collect_summary_issues(result)
+    issue_messages_by_column: dict[str, list[str]] = {}
+    for (_, column_key), messages in summary_issues.items():
+        issue_messages_by_column.setdefault(column_key, []).extend(messages)
+    issue_messages = [message for messages in issue_messages_by_column.values() for message in messages]
+    issue_messages.extend(unassigned_issues)
 
     worksheet.append(
         [
@@ -121,8 +130,32 @@ def append_print_archive(
             round(subsidy_amount + in_transit_amount, 2),
             calculate_summary_total(result, subsidy_amount, taxi_amount, in_transit_amount),
             _get_ride_hailing_interval_notes(result),
+            "；".join(dict.fromkeys(issue_messages)),
         ]
     )
+
+    issue_column_mapping = {
+        "transport_total": 9,
+        "toll_total": 11,
+        "lodging_amount_total": 12,
+        "lodging_tax_total": 13,
+        "lodging_public_total": 12,
+    }
+    issue_fill = PatternFill(fill_type="solid", fgColor="FCE4D6")
+    issue_font = Font(color="C62828", bold=True)
+    data_row = worksheet.max_row
+    for column_key, messages in issue_messages_by_column.items():
+        column_index = issue_column_mapping.get(column_key)
+        if column_index is None:
+            continue
+        cell = worksheet.cell(row=data_row, column=column_index)
+        cell.fill = issue_fill
+        cell.font = issue_font
+        cell.comment = Comment("\n".join(dict.fromkeys(messages)), "发票管理系统")
+    if issue_messages:
+        issue_cell = worksheet.cell(row=data_row, column=len(ARCHIVE_HEADERS))
+        issue_cell.fill = issue_fill
+        issue_cell.font = issue_font
 
     _autosize_columns(worksheet)
     workbook.save(target_path)

@@ -14,7 +14,7 @@ except ImportError:
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QDate, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QKeySequence
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt5.QtWidgets import (
@@ -24,7 +24,9 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDateEdit,
     QFileDialog,
+    QFormLayout,
     QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
@@ -45,10 +47,13 @@ from PyQt5.QtWidgets import (
 )
 
 from invoice_desktop.archive import append_print_archive, get_default_archive_path
+from invoice_desktop.mail_fetcher import fetch_qq_invoice_attachments
 from invoice_desktop.printing import build_print_queue, build_summary_sheet_queue, export_combined_print_pdf, print_pdf_queue
+from invoice_desktop.secrets_store import protect_secret, unprotect_secret
 from python_recognizer.types import InvoiceDateSummary, InvoiceOrganizeResult, InvoiceOrganizeSummary
 from python_recognizer.workflow import (
     apply_organize_result,
+    collect_summary_issues,
     parse_money_text,
     export_summary_sheet,
     organize_invoice_directory,
@@ -56,17 +61,33 @@ from python_recognizer.workflow import (
 
 
 WARNING_ROW_COLOR = QColor("#FFF7E6")
-WARNING_TEXT_COLOR = QColor("#8A5A00")
+WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
+TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
+MAIL_ACCOUNT_SETTING = "mailFetch/account"
+MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
+VSCODE_EXECUTABLE_LOCATIONS = (
+    Path.home() / "AppData" / "Local" / "Programs" / "Microsoft VS Code" / "Code.exe",
+    Path(r"C:\Program Files\Microsoft VS Code\Code.exe"),
+    Path(r"C:\Program Files (x86)\Microsoft VS Code\Code.exe"),
+)
 VERSION_UPDATES = [
     (
-        "v1.0.6（当前版本）",
+        "v1.0.7（当前版本）",
+        [
+            "新增 QQ 邮箱发票抓取：按收件日期下载、筛选并按现有规则重命名 PDF。",
+            "邮箱抓取前增加 VS Code 安装检测，并支持初始化清除保存的 QQ 邮箱账号与 IMAP 授权码。",
+            "修正高速通行费电子发票命名，使用票面发票号码而非发票代码；配套行程单使用对应发票号码命名。",
+        ],
+    ),
+    (
+        "v1.0.6",
         [
             "公共盘上传会包含带发票号码的票据及配套行程单，并排除汇总文件。",
             "打印机设定与开机自启动调整为顶部“设定”菜单下的独立弹窗。",
@@ -219,6 +240,34 @@ QPushButton[role="accent"] {
 QPushButton[role="accent"]:hover {
     background: #397ca7;
 }
+QPushButton[role="tripForm"] {
+    color: #24324A;
+    border: 2px solid #F4B400;
+    background: #FFF3C4;
+    font-weight: 700;
+}
+QPushButton[role="tripForm"]:hover {
+    background: #FFE69A;
+    border-color: #D69200;
+}
+QPushButton[role="qqMail"] {
+    color: #FFFFFF;
+    border: 2px solid #7B1FA2;
+    background: #9C27B0;
+    font-weight: 700;
+}
+QPushButton[role="qqMail"]:hover {
+    background: #B238C6;
+    border-color: #65117F;
+}
+QPushButton[role="danger"] {
+    color: #ffffff;
+    border-color: #b71c1c;
+    background: #d32f2f;
+}
+QPushButton[role="danger"]:hover {
+    background: #e53935;
+}
 QPushButton[feedback="true"] {
     color: #ffffff;
     border-color: #8d5d2f;
@@ -290,6 +339,118 @@ class OrganizeWorker(QThread):
             self.completed.emit(result)
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class MailFetchWorker(QThread):
+    completed = pyqtSignal(str, int)
+    failed = pyqtSignal(str)
+
+    def __init__(self, account: str, authorization_code: str, start_date, end_date) -> None:
+        super().__init__()
+        self.account = account
+        self.authorization_code = authorization_code
+        self.start_date = start_date
+        self.end_date = end_date
+
+    def run(self) -> None:
+        try:
+            output_directory, copied_count = fetch_qq_invoice_attachments(
+                account=self.account,
+                authorization_code=self.authorization_code,
+                start_date=self.start_date,
+                end_date=self.end_date,
+            )
+            self.completed.emit(str(output_directory), copied_count)
+        except Exception as error:
+            self.failed.emit(str(error))
+
+
+class MailInvoiceFetchDialog(QDialog):
+    def __init__(self, settings: QSettings, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("邮箱发票抓取")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        notice = QLabel("此功能需要电脑有安装 VSCODE 2022 版本，且有配置AI环境。")
+        notice.setStyleSheet("color: #C62828; font-weight: 700;")
+        layout.addWidget(notice)
+        layout.addWidget(QLabel("通过 QQ 邮箱 IMAP 安全抓取；授权码使用 Windows 当前用户加密保存。"))
+
+        form = QFormLayout()
+        self.account_input = QLineEdit(str(settings.value(MAIL_ACCOUNT_SETTING, "") or ""))
+        self.auth_code_input = QLineEdit(unprotect_secret(str(settings.value(MAIL_AUTH_CODE_SETTING, "") or "")))
+        self.auth_code_input.setEchoMode(QLineEdit.Password)
+        self.start_date_input = QDateEdit(QDate.currentDate())
+        self.end_date_input = QDateEdit(QDate.currentDate())
+        for date_input in (self.start_date_input, self.end_date_input):
+            date_input.setCalendarPopup(True)
+            date_input.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("QQ 邮箱账号：", self.account_input)
+        form.addRow("IMAP 授权码：", self.auth_code_input)
+        form.addRow("抓取起始日期：", self.start_date_input)
+        form.addRow("抓取结束日期：", self.end_date_input)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("日期范围为左闭右闭；将生成桌面“发票起始日期至结束日期”文件夹。"))
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("确认抓取")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        footer_row = QHBoxLayout()
+        self.initialize_button = QPushButton("初始化")
+        self.initialize_button.setProperty("role", "danger")
+        self.initialize_button.setToolTip("清除已保存的 QQ 邮箱账号与 IMAP 授权码")
+        self.initialize_button.clicked.connect(self.initialize_mail_settings)
+        footer_row.addWidget(self.initialize_button)
+        footer_row.addStretch(1)
+        footer_row.addWidget(self.buttons)
+        layout.addLayout(footer_row)
+
+    def values(self):
+        return (
+            self.account_input.text().strip(),
+            self.auth_code_input.text(),
+            self.start_date_input.date().toPyDate(),
+            self.end_date_input.date().toPyDate(),
+        )
+
+    @staticmethod
+    def is_vscode_installed() -> bool:
+        """检测 Visual Studio Code 是否已安装，兼容用户安装和系统安装。"""
+        if shutil.which("code") or shutil.which("Code.exe"):
+            return True
+        return any(executable.is_file() for executable in VSCODE_EXECUTABLE_LOCATIONS)
+
+    def accept(self) -> None:
+        account, authorization_code, start_date, end_date = self.values()
+        if not self.is_vscode_installed():
+            QMessageBox.warning(
+                self,
+                "未检测到 VS Code",
+                "此电脑未检测到 Visual Studio Code（VSCODE 2022）。\n"
+                "请先安装并完成 AI 环境配置后，再执行邮箱发票抓取。",
+            )
+            return
+        if not account or not authorization_code:
+            QMessageBox.warning(self, "信息不完整", "请填写 QQ 邮箱账号和 IMAP 授权码。")
+            return
+        if start_date > end_date:
+            QMessageBox.warning(self, "日期错误", "起始日期不能晚于结束日期。")
+            return
+        self.settings.setValue(MAIL_ACCOUNT_SETTING, account)
+        self.settings.setValue(MAIL_AUTH_CODE_SETTING, protect_secret(authorization_code))
+        self.settings.sync()
+        super().accept()
+
+    def initialize_mail_settings(self) -> None:
+        """清除当前用户保存的 QQ 邮箱账号和加密授权码。"""
+        self.settings.remove(MAIL_ACCOUNT_SETTING)
+        self.settings.remove(MAIL_AUTH_CODE_SETTING)
+        self.settings.sync()
+        self.account_input.clear()
+        self.auth_code_input.clear()
+        QMessageBox.information(self, "初始化完成", "已清除保存的 QQ 邮箱账号和 IMAP 授权码。")
 
 
 class PrintWorker(QThread):
@@ -408,6 +569,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.current_result: Optional[InvoiceOrganizeResult] = None
         self.worker: Optional[OrganizeWorker] = None
+        self.mail_fetch_worker: Optional[MailFetchWorker] = None
         self.print_worker: Optional[PrintWorker] = None
         self.print_progress_dialog: Optional[QProgressDialog] = None
         self.current_print_task_label = "打印任务"
@@ -699,6 +861,18 @@ class MainWindow(QMainWindow):
         self.open_archive_button.setProperty("role", "success")
         self.open_archive_button.clicked.connect(self.generate_archive_excel)
 
+        self.trip_form_button = QPushButton("✈  出差单填写")
+        self.trip_form_button.setProperty("role", "tripForm")
+        self.trip_form_button.clicked.connect(self.open_trip_form)
+
+        self.qq_mail_button = QPushButton("✉  打开QQ邮箱")
+        self.qq_mail_button.setProperty("role", "qqMail")
+        self.qq_mail_button.clicked.connect(self.open_qq_mail)
+
+        self.mail_fetch_button = QPushButton("邮箱发票抓取")
+        self.mail_fetch_button.setProperty("role", "primary")
+        self.mail_fetch_button.clicked.connect(self.fetch_mail_invoices)
+
         self.phase_label = QLabel("当前状态：等待分析")
         self.phase_label.setProperty("role", "subtitle")
 
@@ -713,6 +887,9 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.manual_summary_button)
         button_row.addWidget(self.print_summary_button)
         button_row.addStretch(1)
+        button_row.addWidget(self.trip_form_button)
+        button_row.addWidget(self.qq_mail_button)
+        button_row.addWidget(self.mail_fetch_button)
 
         layout.addLayout(button_row)
         layout.addWidget(self.phase_label)
@@ -774,11 +951,11 @@ class MainWindow(QMainWindow):
         group = QGroupBox("按日期汇总")
         layout = QVBoxLayout(group)
 
-        self.date_table = QTableWidget(0, 10)
+        self.date_table = QTableWidget(0, 11)
         self.date_table.setHorizontalHeaderLabels(
-            ["日期", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴"]
+            ["日期", "假别", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴"]
         )
-        self.date_table.horizontalHeaderItem(9).setForeground(QBrush(SUBSIDY_HEADER_COLOR))
+        self.date_table.horizontalHeaderItem(10).setForeground(QBrush(SUBSIDY_HEADER_COLOR))
         self.date_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed)
         self.date_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.date_table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -812,11 +989,10 @@ class MainWindow(QMainWindow):
         group = QGroupBox("发票明细")
         layout = QVBoxLayout(group)
 
-        self.table = QTableWidget(0, 14)
+        self.table = QTableWidget(0, 13)
         self.table.setHorizontalHeaderLabels(
             [
                 "日期",
-                "假别",
                 "类别",
                 "总额",
                 "金额",
@@ -838,9 +1014,9 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._detail_column_widths = [90, 62, 78, 72, 72, 72, 150, 135, 170, 170, 62, 90, 90, 150]
-        self._detail_column_min_widths = [76, 54, 64, 62, 62, 62, 110, 100, 110, 110, 52, 72, 72, 90]
-        self._detail_flexible_columns = (6, 8, 9, 13)
+        self._detail_column_widths = [90, 78, 72, 72, 72, 150, 135, 170, 170, 62, 90, 90, 150]
+        self._detail_column_min_widths = [76, 64, 62, 62, 62, 110, 100, 110, 110, 52, 72, 72, 90]
+        self._detail_flexible_columns = (5, 7, 8, 12)
         self._adapt_detail_table_columns()
         layout.addWidget(self.table)
         return group
@@ -898,6 +1074,40 @@ class MainWindow(QMainWindow):
             return
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.current_result.output_directory))
+
+    def open_trip_form(self) -> None:
+        if not QDesktopServices.openUrl(QUrl(TRIP_FORM_URL)):
+            QMessageBox.warning(self, "无法打开出差单", f"无法打开出差单填写入口：\n{TRIP_FORM_URL}")
+
+    def open_qq_mail(self) -> None:
+        if not QDesktopServices.openUrl(QUrl("https://mail.qq.com/")):
+            QMessageBox.warning(self, "无法打开 QQ 邮箱", "无法打开 QQ 邮箱网页登录页。")
+
+    def fetch_mail_invoices(self) -> None:
+        dialog = MailInvoiceFetchDialog(self.settings, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        account, authorization_code, start_date, end_date = dialog.values()
+        self.mail_fetch_worker = MailFetchWorker(account, authorization_code, start_date, end_date)
+        self.mail_fetch_worker.completed.connect(self._on_mail_fetch_completed)
+        self.mail_fetch_worker.failed.connect(self._on_mail_fetch_failed)
+        self.mail_fetch_worker.finished.connect(self._on_mail_fetch_finished)
+        self._set_busy(True)
+        self.phase_label.setText("当前状态：正在抓取 QQ 邮箱发票，请稍候")
+        self.mail_fetch_worker.start()
+
+    def _on_mail_fetch_completed(self, output_directory: str, copied_count: int) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
+        self.phase_label.setText(f"当前状态：已抓取 {copied_count} 个发票 PDF")
+        QMessageBox.information(self, "抓取完成", f"已抓取 {copied_count} 个 PDF 发票：\n{output_directory}")
+
+    def _on_mail_fetch_failed(self, message: str) -> None:
+        self.phase_label.setText("当前状态：邮箱发票抓取失败")
+        QMessageBox.critical(self, "抓取失败", message)
+
+    def _on_mail_fetch_finished(self) -> None:
+        self.mail_fetch_worker = None
+        self._set_busy(False)
 
     def generate_archive_excel(self) -> None:
         if self.current_result is None or not self.current_result.applied:
@@ -1351,6 +1561,9 @@ class MainWindow(QMainWindow):
         self.open_output_button.setEnabled(not busy)
         self.upload_public_disk_button.setEnabled(not busy)
         self.open_archive_button.setEnabled(not busy)
+        self.trip_form_button.setEnabled(not busy)
+        self.qq_mail_button.setEnabled(not busy)
+        self.mail_fetch_button.setEnabled(not busy)
         self.date_table.setEnabled(not busy)
         if not busy:
             self._update_action_buttons()
@@ -1390,6 +1603,14 @@ class MainWindow(QMainWindow):
 
     def _fill_date_table(self, result: InvoiceOrganizeResult) -> None:
         rows = result.summary.daily_breakdown
+        summary_issues, _ = collect_summary_issues(result)
+        summary_column_indexes = {
+            "transport_total": 2,
+            "toll_total": 4,
+            "lodging_amount_total": 5,
+            "lodging_tax_total": 6,
+            "lodging_public_total": 7,
+        }
         self.updating_date_table = True
         self.date_table.setRowCount(len(rows) + 2)
 
@@ -1397,6 +1618,7 @@ class MainWindow(QMainWindow):
             travel_in_transit, taxi_amount, subsidy_amount = self.date_manual_values.get(item.issue_date, ("", 0.0, 0.0))
             values = [
                 item.issue_date,
+                self._get_day_type(item.issue_date),
                 f"{item.transport_total:.2f}",
                 f"{taxi_amount:.2f}" if taxi_amount else "",
                 f"{item.toll_total:.2f}",
@@ -1408,11 +1630,14 @@ class MainWindow(QMainWindow):
                 f"{subsidy_amount:.2f}" if subsidy_amount else "",
             ]
             for column_index, value in enumerate(values):
-                self.date_table.setItem(
-                    row_index,
-                    column_index,
-                    self._build_date_table_item(value, editable=self._is_date_table_column_editable(column_index)),
-                )
+                cell_item = self._build_date_table_item(value, editable=self._is_date_table_column_editable(column_index))
+                column_key = next((key for key, index in summary_column_indexes.items() if index == column_index), "")
+                issues = summary_issues.get((item.issue_date, column_key), []) if column_key else []
+                if issues:
+                    cell_item.setBackground(QBrush(QColor("#FCE4D6")))
+                    cell_item.setForeground(QBrush(QColor("#C62828")))
+                    cell_item.setToolTip("\n".join(issues))
+                self.date_table.setItem(row_index, column_index, cell_item)
 
         for row_index in range(len(rows), len(rows) + 2):
             for column_index in range(self.date_table.columnCount()):
@@ -1433,13 +1658,14 @@ class MainWindow(QMainWindow):
         self._refresh_date_totals()
 
     def _build_empty_manual_row_values(self) -> list[str]:
-        return [datetime.now().strftime("%Y-%m-%d"), "", "", "", "", "", "", "", "", ""]
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        return [current_date, self._get_day_type(current_date), "", "", "", "", "", "", "", "", ""]
 
     def _focus_first_manual_cell(self) -> None:
         if self._date_data_row_count() == 0:
             return
 
-        focus_column = 0 if self.manual_summary_mode else 2
+        focus_column = 0 if self.manual_summary_mode else 3
         self.date_table.setCurrentCell(0, focus_column)
         manual_item = self.date_table.item(0, focus_column)
         if manual_item is not None:
@@ -1456,8 +1682,8 @@ class MainWindow(QMainWindow):
 
     def _is_date_table_column_editable(self, column_index: int) -> bool:
         if self.manual_summary_mode:
-            return 0 <= column_index <= 9
-        return column_index in {2, 8, 9}
+            return column_index in {0, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+        return column_index in {3, 9, 10}
 
     def _date_data_row_count(self) -> int:
         return max(self.date_table.rowCount() - 2, 0)
@@ -1478,13 +1704,13 @@ class MainWindow(QMainWindow):
         values: dict[str, tuple[str, float, float]] = {}
         for row_index in range(self._date_data_row_count()):
             date_item = self.date_table.item(row_index, 0)
-            travel_item = self.date_table.item(row_index, 8)
+            travel_item = self.date_table.item(row_index, 9)
             if date_item is None:
                 continue
             issue_date = date_item.text().strip()
             travel_in_transit = travel_item.text().strip() if travel_item is not None else ""
-            taxi_amount = self._parse_date_table_money(row_index, 2)
-            subsidy_amount = self._parse_date_table_money(row_index, 9)
+            taxi_amount = self._parse_date_table_money(row_index, 3)
+            subsidy_amount = self._parse_date_table_money(row_index, 10)
             existing_travel, existing_taxi, existing_subsidy = values.get(issue_date, ("", 0.0, 0.0))
             combined_travel = "；".join(part for part in [existing_travel, travel_in_transit] if part)
             values[issue_date] = (
@@ -1502,14 +1728,22 @@ class MainWindow(QMainWindow):
         self._sync_date_manual_values()
 
         data_row_count = self._date_data_row_count()
+        for row_index in range(data_row_count):
+            date_item = self.date_table.item(row_index, 0)
+            date_value = date_item.text().strip() if date_item is not None else ""
+            self.date_table.setItem(
+                row_index,
+                1,
+                self._build_date_table_item(self._get_day_type(date_value), editable=False),
+            )
         subtotal_row = data_row_count
         total_row = data_row_count + 1
         money_totals = [
             round(sum(self._parse_date_table_money(row_index, column_index) for row_index in range(data_row_count)), 2)
-            for column_index in [1, 2, 3, 4, 5, 6, 7, 9]
+            for column_index in [2, 3, 4, 5, 6, 7, 8, 10]
         ]
         in_transit_total = round(
-            sum(parse_money_text(self.date_table.item(row_index, 8).text()) for row_index in range(data_row_count) if self.date_table.item(row_index, 8) is not None),
+            sum(parse_money_text(self.date_table.item(row_index, 9).text()) for row_index in range(data_row_count) if self.date_table.item(row_index, 9) is not None),
             2,
         )
         transport_subtotal = round(money_totals[0] + money_totals[1], 2)
@@ -1518,6 +1752,7 @@ class MainWindow(QMainWindow):
 
         subtotal_values = [
             "小计",
+            "",
             f"{transport_subtotal:.2f}",
             f"{money_totals[1]:.2f}",
             f"{money_totals[2]:.2f}",
@@ -1528,7 +1763,7 @@ class MainWindow(QMainWindow):
             "",
             f"{combined_subsidy_total:.2f}",
         ]
-        total_values = ["总计", f"{grand_total:.2f}", "", "", "", "", "", "", "", ""]
+        total_values = ["总计", "", f"{grand_total:.2f}", "", "", "", "", "", "", "", ""]
 
         for column_index, value in enumerate(subtotal_values):
             self.date_table.setItem(subtotal_row, column_index, self._build_date_table_item(value, editable=False, summary=True))
@@ -1545,7 +1780,7 @@ class MainWindow(QMainWindow):
     def _on_date_table_cell_changed(self, row_index: int, column_index: int) -> None:
         if self.updating_date_table or row_index >= self._date_data_row_count():
             return
-        if not self.manual_summary_mode and column_index not in {2, 8, 9}:
+        if not self.manual_summary_mode and column_index not in {3, 9, 10}:
             return
         self._refresh_date_totals()
         if self.manual_summary_mode:
@@ -1555,12 +1790,11 @@ class MainWindow(QMainWindow):
 
     def _fill_table(self, result: InvoiceOrganizeResult) -> None:
         self.table.setRowCount(len(result.records))
-        self.table.horizontalHeaderItem(9).setText("重命名文件名" if result.applied else "目标文件名")
+        self.table.horizontalHeaderItem(8).setText("重命名文件名" if result.applied else "目标文件名")
 
         for row_index, record in enumerate(result.records):
             values = [
                 record.issue_date or "未识别日期",
-                self._get_day_type(record.issue_date),
                 record.category,
                 f"{record.total_amount:.2f}",
                 f"{record.amount:.2f}",
@@ -1650,15 +1884,15 @@ class MainWindow(QMainWindow):
             rows.append(
                 {
                     "issue_date": text_values[0],
-                    "transport_total": self._parse_date_table_money(row_index, 1),
-                    "taxi_amount": self._parse_date_table_money(row_index, 2),
-                    "toll_total": self._parse_date_table_money(row_index, 3),
-                    "lodging_amount_total": self._parse_date_table_money(row_index, 4),
-                    "lodging_tax_total": self._parse_date_table_money(row_index, 5),
-                    "lodging_public_total": self._parse_date_table_money(row_index, 6),
-                    "lodging_total": self._parse_date_table_money(row_index, 7),
-                    "travel_in_transit": text_values[8],
-                    "subsidy_amount": self._parse_date_table_money(row_index, 9),
+                    "transport_total": self._parse_date_table_money(row_index, 2),
+                    "taxi_amount": self._parse_date_table_money(row_index, 3),
+                    "toll_total": self._parse_date_table_money(row_index, 4),
+                    "lodging_amount_total": self._parse_date_table_money(row_index, 5),
+                    "lodging_tax_total": self._parse_date_table_money(row_index, 6),
+                    "lodging_public_total": self._parse_date_table_money(row_index, 7),
+                    "lodging_total": self._parse_date_table_money(row_index, 8),
+                    "travel_in_transit": text_values[9],
+                    "subsidy_amount": self._parse_date_table_money(row_index, 10),
                 }
             )
         return rows

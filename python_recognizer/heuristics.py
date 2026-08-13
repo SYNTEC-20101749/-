@@ -27,6 +27,7 @@ def get_money_upper_bound(category: str) -> float:
         "网约车": 300,
         "网约车行程单": 300,
         "高速通行票": 300,
+        "高速通行费行程单": 300,
         "火车票": 2000,
         "住宿票": 5000,
         "机票": 5000,
@@ -297,6 +298,21 @@ def extract_ride_itinerary_amounts(text: str) -> tuple[float, float, float, str]
     return None
 
 
+def extract_toll_itinerary_amount(text: str) -> tuple[float, str]:
+    """提取高速通行费行程单的总费用，用于与对应电子发票配对。"""
+    patterns = [
+        (
+            "通行费行程单金额",
+            re.compile(r"(?:通行费(?:金额|合计)?|费用(?:合计|金额)?|应收金额|实收金额|支付金额|合计)\s*[:：]?\s*[¥￥]?\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)"),
+        ),
+        (
+            "通行费行程单货币金额",
+            re.compile(r"[¥￥]\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)"),
+        ),
+    ]
+    return extract_numeric_field(text, patterns)
+
+
 def normalize_date_value(value: str) -> str:
     compact_match = re.fullmatch(r"(20\d{2})(\d{2})(\d{2})", value.strip())
     if compact_match:
@@ -361,6 +377,10 @@ def extract_ride_trip_times(text: str) -> tuple[str, str]:
 def derive_invoice_category(text: str, attachment_name: str, vendor: str) -> str:
     corpus = f"{text} {attachment_name} {vendor}"
     rules: list[tuple[re.Pattern[str], str]] = [
+        (
+            re.compile(r"(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务).{0,80}行程单|行程单.{0,80}(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务)", re.IGNORECASE),
+            "高速通行费行程单",
+        ),
         (re.compile(r"(行程单|AMAP\s+ITINERARY|高德地图.*打车|滴滴.*行程单)", re.IGNORECASE), "网约车行程单"),
         (re.compile(r"(火车票|铁路电子客票|铁路车票|电子客票|高铁|动车|铁路|国内旅客运输服务|12306|95306|\b[gdcztk]\d{1,4}\b|一等座|二等座|商务座)", re.IGNORECASE), "火车票"),
         (re.compile(r"(网约车|滴滴|出行服务|出租汽车|出租车|打车|客运服务|代驾|出行人|出发地|到达地|交通工具类型|行程起点|行程终点|里程费|时长费)", re.IGNORECASE), "网约车"),
@@ -499,12 +519,59 @@ def derive_amounts_from_candidates(candidates: list[float]) -> tuple[float, floa
     return None
 
 
+def extract_invoice_number(text: str) -> tuple[str, str]:
+    """提取发票号码，且绝不把发票代码当作发票号码。"""
+    # 江苏省车辆通行费电子发票等传统电子票同时显示“发票代码（12 位）”和
+    # “发票号码（8 位）”。PDF 文本层有时将两个标签排在前面、数值排在后面，
+    # 甚至颠倒字段与数值的读取顺序；此时不能相信单个字段的邻近关系。
+    # 若票面同时包含两个标签，8 位的非日期数字即为该版式的发票号码。
+    if re.search(r"发\s*票\s*代\s*码", text) and re.search(r"发\s*票\s*(?:号\s*码|号|号码|票号)", text):
+        conventional_numbers = [
+            candidate
+            for candidate in re.findall(r"(?<!\d)(\d{8})(?!\d)", text)
+            if not re.fullmatch(r"20\d{6}", candidate)
+        ]
+        if conventional_numbers:
+            return conventional_numbers[0], "代码号码同屏8位发票号码"
+
+    patterns = [
+        (
+            "发票号码字段",
+            re.compile(r"发\s*票\s*(?:号\s*码|号|号码|票号)\s*[:：]?\s*([0-9]{8,20})", re.IGNORECASE),
+        ),
+        (
+            "票据号码字段",
+            re.compile(r"票\s*据\s*(?:号\s*码|号)\s*[:：]?\s*([0-9]{8,20})", re.IGNORECASE),
+        ),
+    ]
+    # 部分电子发票的 PDF 文本层会按绘制顺序输出：先出现“发票号码：”标签，
+    # 再在文末单独输出其数值，导致标签与号码无法相邻匹配。新版电子发票号码
+    # 通常为 16 或 20 位；发票代码通常为 10～12 位，故只允许该长度回退，
+    # 同时排除统一社会信用代码常见的 18 位，避免误命中购销方税号。
+    electronic_invoice_numbers = re.findall(r"(?<!\d)(?:\d{16}|\d{20})(?!\d)", text)
+    # 高速通行费电子发票的发票代码常为 12 位、发票号码为 20 位。PDF/OCR
+    # 偶尔会把“代码”标签错读为“号码”，因此电子票优先使用 16/20 位候选。
+    if electronic_invoice_numbers and re.search(r"(?:电子发票|全电发票|数电发票|通行费|高速|收费公路)", text, re.IGNORECASE):
+        return electronic_invoice_numbers[0], "电子发票号码长度优先"
+
+    for label, pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            return match.group(1), label
+
+    if electronic_invoice_numbers:
+        return electronic_invoice_numbers[0], "电子发票号码长度回退"
+
+    return "", "未命中"
+
+
 def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionResult:
     compact_text = normalize_text(text)
     date_match = re.search(r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", compact_text)
     fallback_year = int(re.search(r"20\d{2}", date_match.group(1)).group()) if date_match else None
     lodging_line_amounts = extract_lodging_line_amounts(compact_text)
     toll_line_amounts = extract_toll_line_amounts(compact_text)
+    toll_itinerary_amount, toll_itinerary_amount_rule = extract_toll_itinerary_amount(compact_text)
     ride_itinerary_amounts = extract_ride_itinerary_amounts(compact_text)
     ride_itinerary_trip_date, ride_itinerary_trip_date_rule = extract_ride_itinerary_trip_date(compact_text)
     ride_start_time, ride_end_time = extract_ride_trip_times(compact_text)
@@ -513,8 +580,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     lodging_stay_days = extract_lodging_stay_days(compact_text)
     toll_trip_date, toll_trip_date_rule = extract_toll_trip_date(compact_text)
 
-    explicit_number_match = re.search(r"(?:发票号码|票据号码|号码)[:：]?\s*([0-9]{8,20})", compact_text)
-    generic_number_match = re.search(r"\b([0-9]{8,20})\b", compact_text)
+    resolved_number, number_rule = extract_invoice_number(compact_text)
 
     total_amount, total_rule = extract_numeric_field(
         compact_text,
@@ -574,6 +640,13 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
         if amount_rule == "未命中" or amount <= 1:
             amount_rule = ride_itinerary_amounts[3]
 
+    if category == "高速通行费行程单" and toll_itinerary_amount > 0:
+        total_amount = toll_itinerary_amount
+        amount = toll_itinerary_amount
+        tax_amount = 0.0
+        total_rule = toll_itinerary_amount_rule
+        amount_rule = toll_itinerary_amount_rule
+
     total_amount = sanitize_money_value(total_amount, category)
     tax_amount = sanitize_money_value(tax_amount, category)
     amount = sanitize_money_value(amount, category)
@@ -588,13 +661,6 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
 
     train_fare, train_fare_rule = extract_train_ticket_fare(compact_text) if category == "火车票" else (0.0, "未命中")
     train_fare = sanitize_money_value(train_fare, category)
-
-    if explicit_number_match:
-        resolved_number = explicit_number_match.group(1)
-    elif category == "网约车行程单":
-        resolved_number = ""
-    else:
-        resolved_number = generic_number_match.group(1) if generic_number_match else ""
 
     fallback_total_amount = total_amount or train_fare or (currency_candidates[0] if currency_candidates else 0.0)
     fallback_tax_amount = tax_amount or 0.0
@@ -634,7 +700,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
         issue_date = train_ticket_trip_date
     elif category == "住宿票" and lodging_start_date:
         issue_date = lodging_start_date
-    elif category == "高速通行票" and toll_trip_date:
+    elif category in {"高速通行票", "高速通行费行程单"} and toll_trip_date:
         issue_date = toll_trip_date
 
     return InvoiceRecognitionResult(
@@ -658,6 +724,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
             "total_amount": total_rule,
             "amount": amount_rule,
             "tax_amount": tax_rule,
+            "number": number_rule,
             "train_fare": train_fare_rule,
             "lodging_stay_days": lodging_stay_days,
             "issue_date": (
@@ -668,7 +735,7 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
                 else lodging_start_date_rule
                 if category == "住宿票" and lodging_start_date
                 else toll_trip_date_rule
-                if category == "高速通行票" and toll_trip_date
+                if category in {"高速通行票", "高速通行费行程单"} and toll_trip_date
                 else "开票日期"
             ),
         },
