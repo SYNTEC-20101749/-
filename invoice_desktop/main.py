@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QInputDialog,
+    QScrollArea,
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
@@ -65,13 +66,15 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
 MAIL_ACCOUNT_SETTING = "mailFetch/account"
 MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
+UI_CONFIG_FILE_NAME = "ui_config.txt"
+MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME = "show_mail_fetch_button"
 VSCODE_EXECUTABLE_LOCATIONS = (
     Path.home() / "AppData" / "Local" / "Programs" / "Microsoft VS Code" / "Code.exe",
     Path(r"C:\Program Files\Microsoft VS Code\Code.exe"),
@@ -79,7 +82,14 @@ VSCODE_EXECUTABLE_LOCATIONS = (
 )
 VERSION_UPDATES = [
     (
-        "v1.0.7（当前版本）",
+        "v1.0.8（当前版本）",
+        [
+            "默认隐藏“邮箱发票抓取”入口，并可通过软件目录下的 ui_config.txt 控制是否显示。",
+            "操作说明书移除邮箱发票抓取及隐藏参数设定相关内容。",
+        ],
+    ),
+    (
+        "v1.0.7",
         [
             "新增 QQ 邮箱发票抓取：按收件日期下载、筛选并按现有规则重命名 PDF。",
             "邮箱抓取前增加 VS Code 安装检测，并支持初始化清除保存的 QQ 邮箱账号与 IMAP 授权码。",
@@ -135,6 +145,42 @@ VERSION_UPDATES = [
         ],
     ),
 ]
+
+def _read_bool_config_value(config_name: str, default: bool = False) -> bool:
+    candidates: list[Path] = []
+    current_dir = Path.cwd()
+    if current_dir not in candidates:
+        candidates.append(current_dir)
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        if executable_dir not in candidates:
+            candidates.append(executable_dir)
+    source_root = Path(__file__).resolve().parents[1]
+    if source_root not in candidates:
+        candidates.append(source_root)
+
+    for candidate_dir in candidates:
+        config_path = candidate_dir / UI_CONFIG_FILE_NAME
+        if not config_path.exists():
+            continue
+        try:
+            for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key.lower() != config_name.lower():
+                    continue
+                normalized_value = value.lower()
+                if normalized_value in {"1", "true", "yes", "y", "on"}:
+                    return True
+                if normalized_value in {"0", "false", "no", "n", "off"}:
+                    return False
+        except OSError:
+            continue
+
+    return default
+
 
 APP_STYLE = """
 QMainWindow {
@@ -869,9 +915,15 @@ class MainWindow(QMainWindow):
         self.qq_mail_button.setProperty("role", "qqMail")
         self.qq_mail_button.clicked.connect(self.open_qq_mail)
 
+        show_mail_fetch_button = _read_bool_config_value(
+            MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME,
+            default=False,
+        )
         self.mail_fetch_button = QPushButton("邮箱发票抓取")
         self.mail_fetch_button.setProperty("role", "primary")
         self.mail_fetch_button.clicked.connect(self.fetch_mail_invoices)
+        if not show_mail_fetch_button:
+            self.mail_fetch_button.hide()
 
         self.phase_label = QLabel("当前状态：等待分析")
         self.phase_label.setProperty("role", "subtitle")
@@ -1215,18 +1267,55 @@ class MainWindow(QMainWindow):
         return cleaned_address
 
     def show_about(self) -> None:
-        update_text = "\n\n".join(
-            f"{version}\n" + "\n".join(f"• {item}" for item in changes)
-            for version, changes in VERSION_UPDATES
-        )
-        QMessageBox.about(
-            self,
-            "关于发票管理系统",
-            f"<h2>发票管理系统</h2>"
-            f"<p>当前版本：<b>v{APP_VERSION}</b></p>"
-            f"<p><b>版本更新信息</b></p>"
-            f"<p>{update_text.replace(chr(10), '<br>')}</p>",
-        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("关于发票管理系统")
+        dialog.resize(820, 680)
+        dialog.setMinimumSize(680, 500)
+
+        root_layout = QVBoxLayout(dialog)
+        root_layout.setContentsMargins(26, 22, 26, 20)
+        root_layout.setSpacing(14)
+
+        title = QLabel("发票管理系统")
+        title.setProperty("role", "title")
+        root_layout.addWidget(title)
+
+        current_version = QLabel(f"当前版本：v{APP_VERSION}")
+        current_version.setStyleSheet("color: #B86B35; font-size: 22px; font-weight: 700;")
+        root_layout.addWidget(current_version)
+
+        description = QLabel("版本更新信息")
+        description.setStyleSheet("color: #17324D; font-size: 18px; font-weight: 700;")
+        root_layout.addWidget(description)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(2, 2, 8, 2)
+        content_layout.setSpacing(10)
+
+        for version, changes in VERSION_UPDATES:
+            update_group = QGroupBox(version)
+            update_layout = QVBoxLayout(update_group)
+            update_layout.setContentsMargins(16, 14, 16, 14)
+            update_layout.setSpacing(8)
+            for change in changes:
+                item = QLabel(f"• {change}")
+                item.setWordWrap(True)
+                item.setStyleSheet("font-size: 16px; line-height: 1.35;")
+                update_layout.addWidget(item)
+            content_layout.addWidget(update_group)
+        content_layout.addStretch(1)
+        scroll_area.setWidget(content_widget)
+        root_layout.addWidget(scroll_area, 1)
+
+        close_button = QPushButton("关闭")
+        close_button.setProperty("role", "primary")
+        close_button.clicked.connect(dialog.accept)
+        root_layout.addWidget(close_button, 0, Qt.AlignRight)
+        dialog.exec_()
 
     def toggle_date_summary(self) -> None:
         should_show = not self.date_summary_group.isVisible()

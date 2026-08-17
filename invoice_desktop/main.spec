@@ -5,7 +5,7 @@ a = Analysis(
     ['../desktop_app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('../ui_config.txt', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -12,7 +12,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.7.docx"
+OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.8.docx"
 
 
 def set_cell_shading(cell, color: str) -> None:
@@ -88,7 +88,7 @@ def add_title_page(document: Document) -> None:
 
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run("版本：v1.0.7\n适用对象：日常出差发票整理、邮箱抓取、汇总、打印及归档人员")
+    subtitle.add_run("版本：v1.0.8\n适用对象：日常出差发票整理、汇总、打印及归档人员")
     document.add_paragraph()
     note = document.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -108,11 +108,10 @@ def build_manual() -> None:
         "3. 标准操作流程：分析、确认、打印、归档",
         "4. 页面与功能说明",
         "5. 网约车行程单与每日打车间隔",
-        "6. QQ 邮箱发票抓取",
-        "7. 汇总清单、打印与 Excel 归档",
-        "8. 设置：打印机与开机自启动",
-        "9. 异常处理与常见问题",
-        "10. 数据、域控部署与使用注意事项",
+        "6. 汇总清单、打印与 Excel 归档",
+        "7. 设置：打印机与开机自启动",
+        "8. 异常处理与常见问题",
+        "9. 数据、域控部署与使用注意事项",
     ])
     document.add_page_break()
 
@@ -126,7 +125,6 @@ def build_manual() -> None:
         "扫描指定文件夹内的 PDF；优先读取 PDF 文本层，文本不足时自动使用本地 OCR 识别。",
         "识别网约车、网约车行程单、火车票、高速通行票、住宿票等常用票据。",
         "自动匹配网约车发票与行程单，行程单不重复计入交通费用。",
-        "从 QQ 邮箱按收件日期范围安全抓取 PDF 附件，自动过滤结账单、结算单、付款凭证及各类明细文件。",
         "识别高速通行费电子发票的发票号码并避免误用发票代码；高速通行费行程单将与对应发票使用同一发票号码命名。",
         "按实际发生日期汇总大众运输、出租车费用、过路费、住宿不含税金额、住宿税额、住宿合计、在途及出差补贴。",
         "自动生成汇总清单 PDF、横向 A5 的汇总合成 PDF、整理后的 PDF 副本、可打印队列和发票打印汇总档案 Excel。",
@@ -152,13 +150,6 @@ def build_manual() -> None:
     document.add_heading("2.2 建议的目录示例", level=2)
     document.add_paragraph("示例：D:\\出差报销\\2026-07杭州出差\\，其中放置火车票、住宿发票、网约车发票和滴滴行程单 PDF。")
     document.add_paragraph("执行分析后，系统会在该目录下创建“原文件夹名称-NewName”输出目录，并覆盖同名旧输出内容。")
-    document.add_heading("2.3 邮箱抓取前准备", level=2)
-    add_bullets(document, [
-        "电脑必须已安装 Visual Studio Code（VSCODE 2022）并完成所需 AI 环境配置；点击“确认抓取”时系统会先检测 VS Code，未检测到则停止抓取并提示。",
-        "QQ 邮箱需在网页端开启 IMAP 服务，并使用 IMAP 授权码；不要输入 QQ 登录密码。",
-        "账号和授权码仅保存在当前 Windows 用户的加密设置中。可在邮箱发票抓取窗口点击“初始化”清除这两项保存内容。",
-    ])
-
     document.add_heading("3. 标准操作流程", level=1)
     document.add_paragraph("建议每次按以下顺序操作，以确保汇总、打印和归档使用的是同一批识别结果。")
     add_numbered_steps(document, [
@@ -185,8 +176,6 @@ def build_manual() -> None:
         ["手动填写汇总", "不使用票据识别结果，手工新建按日期汇总", "进入后将不使用当前分析数据。"],
         ["只打印汇总清单", "仅打印汇总清单 PDF", "适用于重新打印封面汇总表。"],
         ["出差单填写", "打开公司出差单填写入口", "需要网络及相应登录权限。"],
-        ["打开QQ邮箱", "打开 QQ 邮箱网页", "用于核对邮件或获取 IMAP 授权码。"],
-        ["邮箱发票抓取", "从 QQ 邮箱下载并整理发票附件", "抓取前会先验证本机是否已安装 VS Code。"],
     ])
 
     document.add_heading("4.2 发票明细表", level=2)
@@ -236,46 +225,25 @@ def build_manual() -> None:
         "若仍无法识别，可在报销资料中人工备注，系统不会因无法计算时间间隔而停止其他发票整理。",
     ])
 
-    document.add_heading("6. QQ 邮箱发票抓取", level=1)
-    document.add_paragraph("邮箱发票抓取用于按邮件收件日期下载 QQ 邮箱中的相关 PDF 附件，并在桌面生成已筛选、已重命名的文件夹。该功能不会读取或保存 QQ 登录密码。")
-    document.add_heading("6.1 抓取步骤", level=2)
-    add_numbered_steps(document, [
-        "点击操作区的“邮箱发票抓取”。",
-        "填写 QQ 邮箱账号、IMAP 授权码及抓取起始/结束日期。日期范围为左闭右闭，即起始日和结束日当天的邮件都会处理。",
-        "点击“确认抓取”。系统先检测本机的 Visual Studio Code；若未检测到，弹出提示并不执行下载。",
-        "检测通过后，系统安全连接 QQ 邮箱 IMAP，下载指定日期内相关邮件的 PDF 及 ZIP 内 PDF。",
-        "完成后自动打开桌面“发票起始日期至结束日期”文件夹，请核对文件名、金额和发票号码。",
-    ])
-    document.add_heading("6.2 附件筛选、配对与命名", level=2)
-    add_bullets(document, [
-        "系统保留网约车、网约车行程单、火车票、高速通行票、高速通行费行程单、住宿票和机票；结账单、结算单、消费明细、订单明细、付款凭证、支付凭证会自动剔除。",
-        "普通发票命名格式为“发票号码-金额.pdf”；高速通行票为“发票号码-金额-高速通行票.pdf”。",
-        "高速通行费电子发票会使用票面“发票号码”，不会使用“发票代码”。例如票面发票号码为 18759981、金额为 106.00 时，文件名为“18759981-106.00-高速通行票.pdf”。",
-        "网约车或高速通行费行程单成功配对后，文件名为“对应发票号码-金额行程单.pdf”。例如“18759981-106.00行程单.pdf”。",
-        "配对优先使用同一封邮件附件、票据号码或唯一金额；无法确定配对关系时会保留文件，建议以原始票面人工核对。",
-    ])
-    document.add_heading("6.3 初始化邮箱设置", level=2)
-    document.add_paragraph("点击邮箱抓取窗口左下角红色“初始化”按钮，可立即清除当前 Windows 用户保存的 QQ 邮箱账号和加密 IMAP 授权码，同时清空窗口内输入框。初始化不删除已下载发票，也不影响其他软件设置。")
-
-    document.add_heading("7. 汇总清单、打印与 Excel 归档", level=1)
-    document.add_heading("7.1 汇总清单 PDF", level=2)
+    document.add_heading("6. 汇总清单、打印与 Excel 归档", level=1)
+    document.add_heading("6.1 汇总清单 PDF", level=2)
     document.add_paragraph("分析完成后，输出目录会生成“汇总清单.pdf”。内容包括按日期汇总表、备注列和报销流程检查项。备注列会显示每日打车间隔。")
     document.add_paragraph("同时会生成“汇总合成.pdf”，该文件按实际打印顺序合并汇总清单及各票据，使用横向 A5 版面，便于预览、留存或统一打印。")
-    document.add_heading("7.2 打印", level=2)
+    document.add_heading("6.2 打印", level=2)
     add_bullets(document, [
         "点击“一键打印”前，先在“设定 → 打印机设定”中选择可用打印机。",
         "一键打印会先打印 1 份汇总清单，再按各票据的默认份数打印整理后的 PDF。",
         "默认打印规则：住宿票和火车票各 2 份；其他票据 1 份。",
         "打印机不可用、未设置默认打印机或纸张设置异常时，系统会显示提示。",
     ])
-    document.add_heading("7.3 Excel 归档", level=2)
+    document.add_heading("6.3 Excel 归档", level=2)
     document.add_paragraph("点击“生成汇总清单并打开”后，系统会在来源目录生成“发票打印汇总档案.xlsx”，若已有同名文件将覆盖。归档文件包含出差日期、来源与输出目录、打印数量、各类费用、总计和备注。")
     add_bullets(document, [
         "备注列：写入“日期：打车间隔：xh（最早-最晚）”。",
         "“住宿费”=住宿专票不含税金额+住宿普票全额；“税金”仅记录住宿专票税额。",
         "Excel 用于归档与复核，不替代原始 PDF 发票。",
     ])
-    document.add_heading("7.4 公共盘上传", level=2)
+    document.add_heading("6.4 公共盘上传", level=2)
     add_numbered_steps(document, [
         "完成分析汇总后，点击“pdf上传到局域公共盘”。",
         "在弹窗中确认待上传文件列表，填写或点击“选择文件夹”选择目标公共盘路径。列表会包含文件名含已识别发票号码的票据 PDF 及配套网约车行程单。",
@@ -283,17 +251,17 @@ def build_manual() -> None:
         "上传成功后，系统会记住本次目标路径，下次自动带出。",
     ])
 
-    document.add_heading("8. 设置：打印机与开机自启动", level=1)
-    document.add_heading("8.1 打开设置", level=2)
+    document.add_heading("7. 设置：打印机与开机自启动", level=1)
+    document.add_heading("7.1 打开设置", level=2)
     document.add_paragraph("从顶部菜单选择“设定”，其中“打印机设定”和“开机自启动”分别打开独立的设定弹窗。")
-    document.add_heading("8.2 打印机设定", level=2)
+    document.add_heading("7.2 打印机设定", level=2)
     add_numbered_steps(document, [
         "从顶部菜单选择“设定 → 打印机设定”。",
         "点击“选择打印机”。",
         "从 Windows 当前可用打印机列表选择目标设备。",
         "系统会保存选择，下次启动继续使用；如设备变更，请重新选择。",
     ])
-    document.add_heading("8.3 开机自启动", level=2)
+    document.add_heading("7.3 开机自启动", level=2)
     add_bullets(document, [
         "从顶部菜单选择“设定 → 开机自启动”，勾选“开启开机自启动”。",
         "开启后，当前 Windows 用户登录时将自动启动本软件。",
@@ -301,7 +269,7 @@ def build_manual() -> None:
         "此功能使用当前用户的 Windows 启动项，无需管理员权限。",
     ])
 
-    document.add_heading("9. 异常处理与常见问题", level=1)
+    document.add_heading("8. 异常处理与常见问题", level=1)
     add_table(document, ["现象", "可能原因", "处理方法"], [
         ["分析后没有文件", "选择的目录中没有 PDF", "确认目录正确，且文件扩展名为 .pdf。"],
         ["票据显示待核验", "文本层或 OCR 未能可靠识别类别", "打开原始 PDF 人工确认类别、金额与日期。"],
@@ -311,12 +279,10 @@ def build_manual() -> None:
         ["无法打印", "未检测到可用打印机", "在 Windows 中安装或连接打印机，再到设置中选择。"],
         ["公共盘上传失败", "路径不可访问或权限不足", "确认网络、共享路径与写入权限；重新选择目标文件夹。"],
         ["Excel 未更新", "未重新生成归档", "分析完成后再次点击“生成汇总清单并打开”。"],
-        ["邮箱抓取提示未检测到 VS Code", "本机未安装 VS Code 或安装路径不可访问", "安装 Visual Studio Code（VSCODE 2022）并完成 AI 环境配置后重试。"],
-        ["高速票文件名使用发票代码", "旧版本或旧抓取结果", "重新使用更新后的程序抓取；以票面“发票号码”为准。"],
-        ["邮箱账号或授权码需要更换", "已保存的账号信息不再适用", "打开邮箱发票抓取窗口，点击“初始化”后重新填写。"],
+        ["高速票文件名使用发票代码", "旧版本或旧处理结果", "重新使用更新后的程序处理；以票面“发票号码”为准。"],
     ])
 
-    document.add_heading("10. 数据、域控部署与使用注意事项", level=1)
+    document.add_heading("9. 数据、域控部署与使用注意事项", level=1)
     add_bullets(document, [
         "系统会复制并重命名 PDF 到输出目录，不直接修改原始 PDF；原始票据仍应妥善保存。",
         "每次分析会替换同一输出目录中的旧内容。若需要保留旧结果，请在重新分析前备份输出目录。",
@@ -330,7 +296,7 @@ def build_manual() -> None:
     ])
 
     document.add_paragraph()
-    closing = document.add_paragraph("文档版本：v1.0.7　　生成日期：2026-08-13")
+    closing = document.add_paragraph("文档版本：v1.0.8　　生成日期：2026-08-17")
     closing.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     closing.runs[0].font.color.rgb = RGBColor(107, 98, 87)
 
