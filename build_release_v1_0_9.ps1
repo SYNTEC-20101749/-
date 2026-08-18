@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $sourceRoot = $PSScriptRoot
-$buildRoot = 'C:\SYNTECBuild\InvoiceManager-v1.0.8'
-$distRoot = 'C:\SYNTECBuild\dist-v1.0.8'
-$releaseZip = Join-Path $sourceRoot 'release\SYNTEC-InvoiceManager-v1.0.8.zip'
+$buildRoot = 'C:\SYNTECBuild\InvoiceManager-v1.0.9'
+$distRoot = 'C:\SYNTECBuild\dist-v1.0.9'
+$releaseZip = Join-Path $sourceRoot 'release\SYNTEC-InvoiceManager-v1.0.9.zip'
 $python = 'C:\Users\20101749\AppData\Local\Programs\Python\Python38\python.exe'
 
 Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -33,7 +33,7 @@ $internal = Join-Path $appRoot '_internal'
 $pythonDll = Get-ChildItem -Path $internal -Filter 'python*.dll' -File | Select-Object -First 1
 $ctypesPyd = Get-ChildItem -Path $internal -Filter '_ctypes*.pyd' -File | Select-Object -First 1
 $version = (Get-Item -LiteralPath $exe).VersionInfo
-$manual = Get-ChildItem -Path (Join-Path $sourceRoot 'docs') -Filter '*-v1.0.8.docx' -File | Select-Object -First 1
+$manual = Get-ChildItem -Path (Join-Path $sourceRoot 'docs') -Filter '*-v1.0.9.docx' -File | Select-Object -First 1
 $config = Join-Path $sourceRoot 'ui_config.txt'
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Executable was not created.' }
@@ -42,7 +42,7 @@ if (-not $ctypesPyd) { throw 'Embedded ctypes extension is missing.' }
 if ((Split-Path -Leaf $exe) -notmatch '^SYNTEC') { throw 'Executable name must start with SYNTEC.' }
 if ($version.CompanyName -notmatch 'SYNTEC') { throw 'CompanyName must include SYNTEC.' }
 if ($version.LegalCopyright -notmatch 'SYNTEC') { throw 'LegalCopyright must include SYNTEC.' }
-if ($version.FileVersion -notmatch '^1\.0\.8\.0') { throw 'Unexpected file version.' }
+if ($version.FileVersion -notmatch '^1\.0\.9\.0') { throw 'Unexpected file version.' }
 if (-not $manual) { throw 'User manual is missing.' }
 if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { throw 'UI config file is missing.' }
 

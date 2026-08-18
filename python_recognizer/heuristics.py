@@ -300,6 +300,21 @@ def extract_ride_itinerary_amounts(text: str) -> tuple[float, float, float, str]
 
 def extract_toll_itinerary_amount(text: str) -> tuple[float, str]:
     """提取高速通行费行程单的总费用，用于与对应电子发票配对。"""
+    cumulative_amount_match = re.search(
+        r"累计金额\s*(?:\(元\)|（元）)?([\s\S]{0,240}?)(?=购方名称|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if cumulative_amount_match:
+        upper_bound = get_money_upper_bound("高速通行费行程单")
+        amount_candidates = [
+            parse_numeric_value(candidate)
+            for candidate in re.findall(r"\d+(?:\s*\.\s*\d{1,2})?", cumulative_amount_match.group(1))
+        ]
+        valid_amounts = [amount for amount in amount_candidates if 0 < amount <= upper_bound]
+        if valid_amounts:
+            return valid_amounts[0], "通行费行程单累计金额"
+
     patterns = [
         (
             "通行费行程单金额",
@@ -467,7 +482,7 @@ def extract_buyer_tax_id(text: str) -> str:
         return EXPECTED_BUYER_TAX_ID
 
     buyer_section = re.search(
-        r"购买方\s*信息?\s*([\s\S]{0,800}?)(?=销售方\s*信息?|项目名称|货物或应税劳务|$)",
+        r"购\s*买\s*方(?:\s*信\s*息)?\s*([\s\S]{0,800}?)(?=销\s*售\s*方(?:\s*信\s*息)?|项目名称|货物或应税劳务|$)",
         text,
         re.IGNORECASE,
     )
@@ -480,8 +495,13 @@ def extract_buyer_tax_id(text: str) -> str:
     if match:
         return match.group(1)
 
-    # 部分 PDF 文本层会丢失字段标签；仅在购买方区块内回退提取，避免误取销售方税号。
-    fallback_match = re.search(r"(?<![0-9A-Z])([0-9A-Z]{18})(?![0-9A-Z])", compact_candidate)
+    # 部分 PDF 文本层会把字段标签集中排在前方、税号值排在公司名称之后；
+    # 仅在购买方区块内回退提取，避免误取销售方税号。
+    trailing_letter_match = re.search(r"(?<![0-9A-Z])([0-9]{14,19}[A-Z])", compact_candidate)
+    if trailing_letter_match:
+        return trailing_letter_match.group(1)
+
+    fallback_match = re.search(r"(?<![0-9A-Z])([0-9A-Z]{15,20})(?![0-9A-Z])", compact_candidate)
     return fallback_match.group(1) if fallback_match else ""
 
 

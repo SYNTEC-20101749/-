@@ -18,16 +18,19 @@ RIDE_HAILING_FILENAME_PATTERN = re.compile(
 )
 
 
+def is_software_renamed_directory(directory: Path) -> bool:
+    """判断目录是否为本软件创建的“-NewName”重命名输出目录。"""
+    return directory.name.casefold().endswith("-newname")
+
+
 def iter_source_pdf_files(directory: str | Path) -> list[Path]:
-    """递归获取源 PDF，排除本软件生成的重命名输出目录及其内容。"""
+    """递归获取源 PDF，排除所有本软件生成的重命名输出目录及其内容。"""
     base_path = Path(directory)
-    output_directory = base_path / f"{base_path.name}-NewName"
     files: list[Path] = []
     for file_path in base_path.rglob("*.pdf"):
-        try:
-            file_path.relative_to(output_directory)
-        except ValueError:
-            files.append(file_path)
+        if any(is_software_renamed_directory(parent) for parent in file_path.parents):
+            continue
+        files.append(file_path)
     return sorted(files)
 
 

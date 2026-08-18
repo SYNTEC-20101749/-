@@ -12,7 +12,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.8.docx"
+OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.9.docx"
 
 
 def set_cell_shading(cell, color: str) -> None:
@@ -88,7 +88,7 @@ def add_title_page(document: Document) -> None:
 
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run("版本：v1.0.8\n适用对象：日常出差发票整理、汇总、打印及归档人员")
+    subtitle.add_run("版本：v1.0.9\n适用对象：日常出差发票整理、汇总、打印及归档人员")
     document.add_paragraph()
     note = document.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -109,7 +109,7 @@ def build_manual() -> None:
         "4. 页面与功能说明",
         "5. 网约车行程单与每日打车间隔",
         "6. 汇总清单、打印与 Excel 归档",
-        "7. 设置：打印机与开机自启动",
+        "7. 设置：打印机、开机自启动与报销周期闪烁",
         "8. 异常处理与常见问题",
         "9. 数据、域控部署与使用注意事项",
     ])
@@ -251,9 +251,9 @@ def build_manual() -> None:
         "上传成功后，系统会记住本次目标路径，下次自动带出。",
     ])
 
-    document.add_heading("7. 设置：打印机与开机自启动", level=1)
+    document.add_heading("7. 设置：打印机、开机自启动与报销周期闪烁", level=1)
     document.add_heading("7.1 打开设置", level=2)
-    document.add_paragraph("从顶部菜单选择“设定”，其中“打印机设定”和“开机自启动”分别打开独立的设定弹窗。")
+    document.add_paragraph("从顶部菜单选择“设定”，打印机、开机自启动和报销周期闪烁均通过独立设定弹窗进行配置。")
     document.add_heading("7.2 打印机设定", level=2)
     add_numbered_steps(document, [
         "从顶部菜单选择“设定 → 打印机设定”。",
@@ -267,6 +267,12 @@ def build_manual() -> None:
         "开启后，当前 Windows 用户登录时将自动启动本软件。",
         "取消勾选即可关闭，不影响已生成的汇总、归档或设置。",
         "此功能使用当前用户的 Windows 启动项，无需管理员权限。",
+    ])
+    document.add_heading("7.4 报销周期提醒闪烁", level=2)
+    add_bullets(document, [
+        "从顶部菜单选择“设定 → 报销周期闪烁设定”。",
+        "勾选“开启报销周期提醒闪烁”后，报销截止日期剩余 10 天或更少时，顶部提醒会闪烁。",
+        "取消勾选即可关闭闪烁；红色临界提醒仍会保留。设置会自动保存。",
     ])
 
     document.add_heading("8. 异常处理与常见问题", level=1)
@@ -296,7 +302,7 @@ def build_manual() -> None:
     ])
 
     document.add_paragraph()
-    closing = document.add_paragraph("文档版本：v1.0.8　　生成日期：2026-08-17")
+    closing = document.add_paragraph("文档版本：v1.0.9　　生成日期：2026-08-18")
     closing.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     closing.runs[0].font.color.rgb = RGBColor(107, 98, 87)
 

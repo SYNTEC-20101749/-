@@ -3,15 +3,18 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+import ctypes
+import os
 import re
 import shutil
+import stat
 from xml.sax.saxutils import escape
 
 from reportlab.lib.pagesizes import A5, landscape
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.lib.styles import ParagraphStyle
 
 from .extractors import extract_text
@@ -181,11 +184,34 @@ def build_output_directory(base_path: Path) -> Path:
     return base_path / f"{base_path.name}-NewName"
 
 
+def clear_readonly_attribute(path: Path) -> None:
+    """清除文件或目录的只读属性，兼容 Windows DOS 文件属性。"""
+    path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    if os.name != "nt":
+        return
+
+    readonly_attribute = 0x00000001
+    invalid_file_attributes = 0xFFFFFFFF
+    attributes = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+    if attributes in {-1, invalid_file_attributes}:
+        raise ctypes.WinError()
+    if attributes & readonly_attribute:
+        if not ctypes.windll.kernel32.SetFileAttributesW(str(path), attributes & ~readonly_attribute):
+            raise ctypes.WinError()
+
+
+def _remove_readonly_and_retry(function, path: str, exception_info) -> None:
+    """处理删除旧输出目录时被只读文件阻止的情况。"""
+    clear_readonly_attribute(Path(path))
+    function(path)
+
+
 def replace_output_directory(output_directory: Path) -> None:
     """删除已有输出内容，确保每次整理结果完整替换旧版本。"""
     if output_directory.is_dir():
-        shutil.rmtree(output_directory)
+        shutil.rmtree(output_directory, onerror=_remove_readonly_and_retry)
     elif output_directory.exists():
+        clear_readonly_attribute(output_directory)
         output_directory.unlink()
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -274,7 +300,7 @@ def correct_train_ticket_amount_from_filename(record_result, file_name: str) -> 
 
 
 EXPECTED_BUYER_TAX_ID = "91320594688334374M"
-TAX_ID_REVIEW_EXEMPT_CATEGORIES = {"火车票", "机票", "网约车行程单"}
+TAX_ID_REVIEW_EXEMPT_CATEGORIES = {"火车票", "机票", "网约车行程单", "高速通行费行程单"}
 
 
 def build_review_warnings(
@@ -487,10 +513,6 @@ def export_summary_sheet(
     daily_table_style.add("RIGHTPADDING", (0, 0), (-1, -1), 3)
     daily_table_style.add("TOPPADDING", (0, 0), (-1, -1), 3)
     daily_table_style.add("BOTTOMPADDING", (0, 0), (-1, -1), 3)
-    daily_table_style.add("BACKGROUND", (1, subtotal_row_index), (1, subtotal_row_index), colors.HexColor("#F9E3B8"))
-    daily_table_style.add("TEXTCOLOR", (1, subtotal_row_index), (1, subtotal_row_index), colors.HexColor("#8A4B12"))
-    daily_table_style.add("FONTNAME", (1, subtotal_row_index), (1, subtotal_row_index), "STSong-Light")
-    daily_table_style.add("FONTSIZE", (1, subtotal_row_index), (1, subtotal_row_index), 8.5)
     summary_column_indexes = {
         "transport_total": 1,
         "toll_total": 3,
@@ -498,14 +520,8 @@ def export_summary_sheet(
         "lodging_tax_total": 5,
         "lodging_public_total": 4,
     }
-    for row_index, item in enumerate(result.summary.daily_breakdown, start=1):
-        for column_key, column_index in summary_column_indexes.items():
-            if summary_issues.get((item.issue_date, column_key)):
-                daily_table_style.add("BACKGROUND", (column_index, row_index), (column_index, row_index), colors.HexColor("#FCE4D6"))
-                daily_table_style.add("TEXTCOLOR", (column_index, row_index), (column_index, row_index), colors.HexColor("#C62828"))
-                daily_table_style.add("FONTNAME", (column_index, row_index), (column_index, row_index), "STSong-Light")
     if unassigned_issues:
-        daily_rows[-2][-1] = "；".join(["未归类异常", *unassigned_issues])
+        daily_rows[-2][-1] = f"未归类异常：{len(unassigned_issues)} 项（详见明细列表）"
 
     checklist_rows = [
         ["□ 填写TQM报销"],
@@ -516,16 +532,43 @@ def export_summary_sheet(
         [Paragraph(escape(str(value)), header_style if row_index == 0 else body_style) for value in row]
         for row_index, row in enumerate(daily_rows)
     ]
+    daily_table_flowables = []
+    max_data_rows_per_page = 8
+    for start_row_index in range(1, len(wrapped_daily_rows), max_data_rows_per_page):
+        end_row_index = min(start_row_index + max_data_rows_per_page, len(wrapped_daily_rows))
+        chunk_rows = [wrapped_daily_rows[0], *wrapped_daily_rows[start_row_index:end_row_index]]
+        chunk_style = TableStyle(daily_table_style.getCommands())
+
+        if start_row_index <= subtotal_row_index < end_row_index:
+            local_row_index = subtotal_row_index - start_row_index + 1
+            chunk_style.add("BACKGROUND", (1, local_row_index), (1, local_row_index), colors.HexColor("#F9E3B8"))
+            chunk_style.add("TEXTCOLOR", (1, local_row_index), (1, local_row_index), colors.HexColor("#8A4B12"))
+            chunk_style.add("FONTNAME", (1, local_row_index), (1, local_row_index), "STSong-Light")
+            chunk_style.add("FONTSIZE", (1, local_row_index), (1, local_row_index), 8.5)
+
+        for row_index in range(start_row_index, min(end_row_index, subtotal_row_index)):
+            item = result.summary.daily_breakdown[row_index - 1]
+            local_row_index = row_index - start_row_index + 1
+            for column_key, column_index in summary_column_indexes.items():
+                if summary_issues.get((item.issue_date, column_key)):
+                    chunk_style.add("BACKGROUND", (column_index, local_row_index), (column_index, local_row_index), colors.HexColor("#FCE4D6"))
+                    chunk_style.add("TEXTCOLOR", (column_index, local_row_index), (column_index, local_row_index), colors.HexColor("#C62828"))
+                    chunk_style.add("FONTNAME", (column_index, local_row_index), (column_index, local_row_index), "STSong-Light")
+
+        daily_table_flowables.append(
+            Table(
+                chunk_rows,
+                colWidths=[42, 48, 48, 42, 48, 42, 42, 48, 96],
+                style=chunk_style,
+            )
+        )
+        if end_row_index < len(wrapped_daily_rows):
+            daily_table_flowables.append(PageBreak())
 
     story = [
         Paragraph(build_trip_summary_title(result), title_style),
         Spacer(1, 10),
-        Table(
-            wrapped_daily_rows,
-            colWidths=[42, 48, 48, 42, 48, 42, 42, 48, 96],
-            repeatRows=1,
-            style=daily_table_style,
-        ),
+        *daily_table_flowables,
         Spacer(1, 10),
         Paragraph("报销流程检查", section_style),
         Table(
@@ -728,6 +771,7 @@ def apply_organize_result(result: InvoiceOrganizeResult) -> InvoiceOrganizeResul
         target_path = Path(result.source_directory) / record.rename_target
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, target_path)
+        clear_readonly_attribute(target_path)
 
     result.applied = True
     return export_summary_sheet(result)

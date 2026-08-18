@@ -66,13 +66,15 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
+APP_RELEASE_DATE = "2026-08-18"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
 MAIL_ACCOUNT_SETTING = "mailFetch/account"
 MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
+REIMBURSEMENT_BLINK_SETTING = "reimbursementReminder/blinkEnabled"
 UI_CONFIG_FILE_NAME = "ui_config.txt"
 MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME = "show_mail_fetch_button"
 VSCODE_EXECUTABLE_LOCATIONS = (
@@ -82,42 +84,48 @@ VSCODE_EXECUTABLE_LOCATIONS = (
 )
 VERSION_UPDATES = [
     (
-        "v1.0.8（当前版本）",
+        "v1.0.9（2026-08-18，当前版本）",
         [
-            "默认隐藏“邮箱发票抓取”入口，并可通过软件目录下的 ui_config.txt 控制是否显示。",
-            "操作说明书移除邮箱发票抓取及隐藏参数设定相关内容。",
+            "新增报销周期提醒闪烁开关，可在“设定 → 报销周期闪烁设定”弹窗中开启或关闭。",
+            "优化高速通行费行程单金额识别、购方税号识别与异常提示。",
+            "优化只读文件处理、历史输出目录排除和汇总清单分页显示。",
         ],
     ),
     (
-        "v1.0.7",
+        "v1.0.8（2026-08-17）",
         [
-            "新增 QQ 邮箱发票抓取：按收件日期下载、筛选并按现有规则重命名 PDF。",
-            "邮箱抓取前增加 VS Code 安装检测，并支持初始化清除保存的 QQ 邮箱账号与 IMAP 授权码。",
-            "修正高速通行费电子发票命名，使用票面发票号码而非发票代码；配套行程单使用对应发票号码命名。",
+            "优化版本信息显示",
         ],
     ),
     (
-        "v1.0.6",
+        "v1.0.7（2026-08-13）",
+        [
+            "提供报销填写快速链接。",
+            "提供QQ邮箱快速链接。",
+        ],
+    ),
+    (
+        "v1.0.6（2026-08-12）",
         [
             "公共盘上传会包含带发票号码的票据及配套行程单，并排除汇总文件。",
             "打印机设定与开机自启动调整为顶部“设定”菜单下的独立弹窗。",
         ],
     ),
     (
-        "v1.0.5",
+        "v1.0.5（2026-08-05）",
         [
             "新增每日网约车打车间隔统计，并写入行程单提示与归档备注。",
             "新增 Windows 开机自启动开关。",
         ],
     ),
     (
-        "v1.0.4",
+        "v1.0.4（2026-08-05）",
         [
             "局域公共盘上传目标可自由选择，并自动记忆上次成功使用的文件夹。",
         ],
     ),
     (
-        "v1.0.3",
+        "v1.0.3（2026-08-04）",
         [
             "移除 QQ 邮箱拉取发票功能，保留本地文件夹整理流程。",
             "优化界面自适应、按日期小计显示和局域公共盘上传规则。",
@@ -125,19 +133,19 @@ VERSION_UPDATES = [
         ],
     ),
     (
-        "v1.0.2",
+        "v1.0.2（2026-08-04）",
         [
             "新增 PDF 上传到局域公共盘入口，可将输出 PDF 复制到公共盘发票上传目录。",
         ],
     ),
     (
-        "v1.0.1",
+        "v1.0.1（2026-08-03）",
         [
             "新增“关于”入口，可查看当前版本号与版本更新信息。",
         ],
     ),
     (
-        "v1.0.0",
+        "v1.0.0（2026-08-03）",
         [
             "支持 PDF 发票文本提取与本地 OCR 识别。",
             "支持目录扫描、网约车发票与行程单配对、汇总及重命名。",
@@ -147,17 +155,10 @@ VERSION_UPDATES = [
 ]
 
 def _read_bool_config_value(config_name: str, default: bool = False) -> bool:
-    candidates: list[Path] = []
-    current_dir = Path.cwd()
-    if current_dir not in candidates:
-        candidates.append(current_dir)
     if getattr(sys, "frozen", False):
-        executable_dir = Path(sys.executable).resolve().parent
-        if executable_dir not in candidates:
-            candidates.append(executable_dir)
-    source_root = Path(__file__).resolve().parents[1]
-    if source_root not in candidates:
-        candidates.append(source_root)
+        candidates = [Path(sys.executable).resolve().parent / "_internal"]
+    else:
+        candidates = [Path(__file__).resolve().parents[1]]
 
     for candidate_dir in candidates:
         config_path = candidate_dir / UI_CONFIG_FILE_NAME
@@ -626,6 +627,7 @@ class MainWindow(QMainWindow):
         self.selected_directory = self.default_directory
         self.settings = QSettings("SYNTEC", "InvoiceManager")
         self.selected_printer_name = self._load_selected_printer_name()
+        self.reimbursement_blink_enabled = self._is_reimbursement_blink_enabled()
         self.date_manual_values: dict[str, tuple[str, float, float]] = {}
         self.updating_date_table = False
         self.reminder_blink_state = True
@@ -641,6 +643,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         self.settings_dialog = self._build_settings_dialog()
         self.auto_start_settings_dialog = self._build_auto_start_settings_dialog()
+        self.reimbursement_blink_settings_dialog = self._build_reimbursement_blink_settings_dialog()
         self._build_menu_bar()
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(18, 18, 18, 18)
@@ -671,6 +674,9 @@ class MainWindow(QMainWindow):
         self.auto_start_action = QAction("开机自启动", self)
         self.auto_start_action.triggered.connect(self.show_auto_start_settings)
         self.settings_menu.addAction(self.auto_start_action)
+        self.reimbursement_blink_action = QAction("报销周期闪烁设定", self)
+        self.reimbursement_blink_action.triggered.connect(self.show_reimbursement_blink_settings)
+        self.settings_menu.addAction(self.reimbursement_blink_action)
 
         self.help_menu = menu_bar.addMenu("帮助")
         self.about_action = QAction("关于 / 更新说明", self)
@@ -737,11 +743,57 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(close_button, 0, Qt.AlignRight)
         return dialog
 
+    def _build_reimbursement_blink_settings_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("报销周期闪烁设定")
+        dialog.setModal(True)
+        dialog.resize(620, 230)
+
+        root_layout = QVBoxLayout(dialog)
+        root_layout.setSpacing(12)
+        blink_group = QGroupBox("报销周期提醒闪烁")
+        blink_layout = QVBoxLayout(blink_group)
+        blink_layout.setSpacing(10)
+        description = QLabel("开启后，报销截止日期剩余 10 天或更少时，顶部报销周期提醒会闪烁。")
+        description.setWordWrap(True)
+        blink_layout.addWidget(description)
+        self.reimbursement_blink_checkbox = QCheckBox("开启报销周期提醒闪烁")
+        self.reimbursement_blink_checkbox.setChecked(self.reimbursement_blink_enabled)
+        self.reimbursement_blink_checkbox.toggled.connect(self.set_reimbursement_blink_enabled)
+        blink_layout.addWidget(self.reimbursement_blink_checkbox)
+        root_layout.addWidget(blink_group)
+        root_layout.addStretch(1)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        root_layout.addWidget(close_button, 0, Qt.AlignRight)
+        return dialog
+
     def show_printer_settings(self) -> None:
         self.settings_dialog.exec_()
 
     def show_auto_start_settings(self) -> None:
         self.auto_start_settings_dialog.exec_()
+
+    def show_reimbursement_blink_settings(self) -> None:
+        self.reimbursement_blink_settings_dialog.exec_()
+
+    def _is_reimbursement_blink_enabled(self) -> bool:
+        value = self.settings.value(REIMBURSEMENT_BLINK_SETTING, True)
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
+
+    def set_reimbursement_blink_enabled(self, enabled: bool) -> None:
+        self.reimbursement_blink_enabled = enabled
+        self.settings.setValue(REIMBURSEMENT_BLINK_SETTING, enabled)
+        self.settings.sync()
+        self.reimbursement_blink_checkbox.blockSignals(True)
+        self.reimbursement_blink_checkbox.setChecked(enabled)
+        self.reimbursement_blink_checkbox.blockSignals(False)
+        if hasattr(self, "reimbursement_reminder_label"):
+            self._update_reimbursement_reminder()
+        self.status_bar.showMessage("已开启报销周期提醒闪烁。" if enabled else "已关闭报销周期提醒闪烁。")
 
     @staticmethod
     def _auto_start_command() -> str:
@@ -835,8 +887,9 @@ class MainWindow(QMainWindow):
         current_date = datetime.now().date()
         start_date, deadline = self._get_reimbursement_period(current_date)
         remaining_days = (deadline - current_date).days
-        should_blink = remaining_days <= 10
-        background_role = "reimbursementReminderCritical" if should_blink else "reimbursementReminder"
+        is_critical = remaining_days <= 10
+        should_blink = is_critical and self.reimbursement_blink_enabled
+        background_role = "reimbursementReminderCritical" if is_critical else "reimbursementReminder"
         self.reimbursement_reminder_label.setProperty("role", background_role)
         self.reimbursement_reminder_label.setText(
             f"报销周期：{start_date:%Y年%m月%d日} 至 {deadline:%Y年%m月%d日}　"
@@ -1280,7 +1333,7 @@ class MainWindow(QMainWindow):
         title.setProperty("role", "title")
         root_layout.addWidget(title)
 
-        current_version = QLabel(f"当前版本：v{APP_VERSION}")
+        current_version = QLabel(f"当前版本：v{APP_VERSION}（{APP_RELEASE_DATE}）")
         current_version.setStyleSheet("color: #B86B35; font-size: 22px; font-weight: 700;")
         root_layout.addWidget(current_version)
 
