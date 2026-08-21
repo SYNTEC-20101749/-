@@ -12,7 +12,7 @@ from docx.shared import Cm, Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.9.docx"
+OUTPUT_PATH = ROOT / "docs" / "发票管理系统操作说明书-v1.0.10.docx"
 
 
 def set_cell_shading(cell, color: str) -> None:
@@ -88,7 +88,7 @@ def add_title_page(document: Document) -> None:
 
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle.add_run("版本：v1.0.9\n适用对象：日常出差发票整理、汇总、打印及归档人员")
+    subtitle.add_run("版本：v1.0.10\n适用对象：日常出差发票整理、汇总、打印及归档人员")
     document.add_paragraph()
     note = document.add_paragraph()
     note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -186,7 +186,7 @@ def build_manual() -> None:
         ["总额/金额/税额", "票据金额字段", "住宿专票应重点检查金额与税额。"],
         ["供应商/平台", "销售方或出行平台", "用于辅助网约车配对与人工核对。"],
         ["发票号", "识别出的发票号码", "缺失时会显示复核提示。"],
-        ["重命名文件名", "输出目录中使用的新文件名", "避免直接修改原始文件。"],
+        ["重命名文件名", "输出目录中使用的新文件名", "无法取得发票号码时会加入【异常需人工符合】标识。"],
         ["配对状态", "网约车发票与行程单的匹配可信度", "未配对行程单需要人工确认。"],
         ["复核状态/提示", "系统提醒信息", "包括税号、住宿票种、金额和每日打车间隔等。"],
     ])
@@ -268,6 +268,7 @@ def build_manual() -> None:
         "取消勾选即可关闭，不影响已生成的汇总、归档或设置。",
         "此功能使用当前用户的 Windows 启动项，无需管理员权限。",
     ])
+
     document.add_heading("7.4 报销周期提醒闪烁", level=2)
     add_bullets(document, [
         "从顶部菜单选择“设定 → 报销周期闪烁设定”。",
@@ -302,7 +303,7 @@ def build_manual() -> None:
     ])
 
     document.add_paragraph()
-    closing = document.add_paragraph("文档版本：v1.0.9　　生成日期：2026-08-18")
+    closing = document.add_paragraph("文档版本：v1.0.10　　生成日期：2026-08-20")
     closing.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     closing.runs[0].font.color.rgb = RGBColor(107, 98, 87)
 

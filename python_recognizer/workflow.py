@@ -18,7 +18,7 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 from reportlab.lib.styles import ParagraphStyle
 
 from .extractors import extract_text
-from .heuristics import recognize_invoice_text
+from .heuristics import extract_invoice_tax_rate, recognize_invoice_text
 from .pairing import extract_filename_pair_info, iter_source_pdf_files, pair_ride_hailing_documents
 from .types import InvoiceDateSummary, InvoiceOrganizeRecord, InvoiceOrganizeResult, InvoiceOrganizeSummary
 
@@ -27,6 +27,7 @@ SPECIAL_RENAME_CATEGORIES = {"网约车行程单", "火车票", "高速通行票
 DOUBLE_PRINT_CATEGORIES = {"火车票", "住宿票"}
 TRANSPORT_CATEGORIES = {"网约车", "火车票"}
 TOLL_CATEGORIES = {"高速通行票"}
+NON_BILLABLE_TOLL_DOCUMENT_CATEGORIES = {"高速通行费行程单"}
 LODGING_CATEGORIES = {"住宿票"}
 UNKNOWN_DATE_LABEL = "未识别日期"
 SUMMARY_ISSUE_COLUMNS = {
@@ -236,7 +237,7 @@ def build_rename_target(
     if stem_number:
         base_name = f"{stem_number}-{amount_part}"
     else:
-        base_name = f"{stem_vendor}-{date_part}-{amount_part}"
+        base_name = f"{stem_vendor}-{date_part}-{amount_part}-【异常需人工符合】"
 
     if category in SPECIAL_RENAME_CATEGORIES:
         base_name = f"{base_name}-{sanitize_filename_component(category)}"
@@ -258,9 +259,65 @@ def pair_lookup(results: list) -> dict[str, tuple[str, str]]:
     return lookup
 
 
+def reconcile_ride_hailing_invoice_from_itinerary(
+    invoice_record: InvoiceOrganizeRecord,
+    itinerary_record: InvoiceOrganizeRecord,
+) -> bool:
+    """用已配对行程单补正网约车发票的异常总额或遗漏税额。
+
+    电子发票文字层偶尔会漏掉总额，或将项目数量 1.00 误作总额；已配对的
+    行程单保留实际支付金额。若发票项目金额加税额与行程单一致，或发票总额
+    未识别，使用行程单补正总额；只在差额可作为合理税额时补正税额。
+    """
+    if invoice_record.category != "网约车" or itinerary_record.category != "网约车行程单":
+        return False
+    if itinerary_record.total_amount <= 0:
+        return False
+
+    itinerary_total = round(itinerary_record.total_amount, 2)
+    line_total = round(invoice_record.amount + invoice_record.tax_amount, 2)
+    if invoice_record.amount > 0 and abs(line_total - itinerary_total) <= 0.02:
+        if abs(invoice_record.total_amount - itinerary_total) <= 0.02:
+            return False
+        invoice_record.total_amount = itinerary_total
+        invoice_record.hints.append("价税合计异常，已按配对行程单及项目金额税额补正")
+        return True
+
+    if invoice_record.total_amount <= 0:
+        invoice_record.total_amount = itinerary_total
+        try:
+            invoice_text, _, _ = extract_text(Path(invoice_record.source_path), enable_ocr=True)
+            tax_rate = extract_invoice_tax_rate(invoice_text)
+        except Exception:
+            tax_rate = 0.0
+        if tax_rate:
+            invoice_record.amount = round(itinerary_total / (1 + tax_rate), 2)
+            invoice_record.tax_amount = round(itinerary_total - invoice_record.amount, 2)
+            invoice_record.hints.append("项目金额未识别，已按票面税率反算金额和税额")
+        invoice_record.hints.append("价税合计未识别，已按配对行程单补正")
+        return True
+
+    if invoice_record.amount <= 0 or abs(invoice_record.total_amount - invoice_record.amount) >= 0.01:
+        return False
+
+    derived_tax = round(itinerary_total - invoice_record.amount, 2)
+    if derived_tax <= 0 or derived_tax > invoice_record.amount * 0.25:
+        return False
+
+    invoice_record.tax_amount = derived_tax
+    invoice_record.total_amount = itinerary_total
+    invoice_record.hints.append("价税合计已按配对行程单补正")
+    return True
+
+
 def correct_ride_hailing_amount_from_filename(record_result, file_name: str) -> None:
     _, filename_amount, _ = extract_filename_pair_info(file_name)
-    if filename_amount is None or record_result.category not in {"网约车", "网约车行程单"}:
+    # 文件名只是 OCR 完全无法识别时的兜底。用户下载的原始附件也可能形如
+    # “发票号-1.00.pdf”，其中金额并不可靠，绝不能覆盖票面项目行/价税合计
+    # 已识别出的真实金额。
+    if filename_amount is None or filename_amount <= 0 or record_result.category not in {"网约车", "网约车行程单"}:
+        return
+    if record_result.total_amount > 0:
         return
 
     record_result.total_amount = round(filename_amount, 2)
@@ -300,7 +357,12 @@ def correct_train_ticket_amount_from_filename(record_result, file_name: str) -> 
 
 
 EXPECTED_BUYER_TAX_ID = "91320594688334374M"
-TAX_ID_REVIEW_EXEMPT_CATEGORIES = {"火车票", "机票", "网约车行程单", "高速通行费行程单"}
+TAX_ID_REVIEW_EXEMPT_CATEGORIES = {
+    "火车票",
+    "机票",
+    "网约车行程单",
+    "高速通行费行程单",
+}
 
 
 def build_review_warnings(
@@ -313,7 +375,7 @@ def build_review_warnings(
     lodging_invoice_type: str,
 ) -> list[str]:
     warnings: list[str] = []
-    if not number and category not in {"网约车行程单", "高速通行费行程单", "火车票"}:
+    if not number and category not in {"网约车行程单", *NON_BILLABLE_TOLL_DOCUMENT_CATEGORIES, "火车票"}:
         warnings.append("缺少发票号码")
     if total_amount <= 0:
         warnings.append("总金额未识别")
@@ -681,6 +743,18 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
 
         if itinerary_record.issue_date:
             invoice_record.issue_date = itinerary_record.issue_date
+
+        if reconcile_ride_hailing_invoice_from_itinerary(invoice_record, itinerary_record):
+            pair.amount = invoice_record.total_amount
+            invoice_record.rename_target = build_rename_target(
+                invoice_record.source_file,
+                invoice_record.category,
+                invoice_record.number,
+                invoice_record.total_amount,
+                invoice_record.vendor,
+                invoice_record.issue_date,
+                output_folder_name,
+            )
 
         if not invoice_record.number:
             continue

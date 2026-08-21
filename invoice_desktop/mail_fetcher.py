@@ -7,18 +7,26 @@ from pathlib import Path
 import imaplib
 import re
 import shutil
-from typing import Optional
+from typing import Callable, Optional, Union
 import zipfile
 
 from python_recognizer.extractors import extract_text
 from python_recognizer.heuristics import recognize_invoice_text
-from python_recognizer.pairing import pair_ride_hailing_documents
+from python_recognizer.pairing import build_ride_hailing_candidate_from_recognition, pair_ride_hailing_candidates
 from python_recognizer.workflow import build_rename_target
 
 
 INVOICE_KEYWORDS = ("发票", "invoice", "票根", "12306", "滴滴", "高德", "出行", "酒店", "通行")
 EXCLUDED_DOCUMENT_KEYWORDS = ("结账单", "结算单", "消费明细", "费用明细", "订单明细", "付款凭证", "支付凭证")
-INVOICE_CATEGORIES = {"网约车", "网约车行程单", "火车票", "高速通行票", "高速通行费行程单", "住宿票", "机票"}
+INVOICE_CATEGORIES = {
+    "网约车",
+    "网约车行程单",
+    "火车票",
+    "高速通行票",
+    "高速通行费行程单",
+    "住宿票",
+    "机票",
+}
 
 
 def _decode_header_value(value: Optional[str]) -> str:
@@ -120,13 +128,19 @@ def _match_toll_itineraries(recognized_files: dict[str, tuple[Path, object]]) ->
     return matches
 
 
-def _filter_and_rename_downloads(output_directory: Path) -> int:
+def _filter_and_rename_downloads(
+    output_directory: Path,
+    progress_callback: Callable[[str], None] | None = None,
+) -> int:
     """只保留发票/行程单 PDF，并按现有发票管理系统规则重命名。"""
     recognized_files: dict[str, tuple[Path, object]] = {}
+    pdf_files = list(output_directory.glob("*.pdf"))
 
     # 先完整识别所有附件，不能边识别边改名；网约车行程单需要在下一步使用
     # 对应发票的号码命名，规则与“分析汇总”完全一致。
-    for file_path in list(output_directory.glob("*.pdf")):
+    for index, file_path in enumerate(pdf_files, start=1):
+        if progress_callback:
+            progress_callback(f"正在识别 PDF：{index}/{len(pdf_files)}")
         try:
             text, _, _ = extract_text(file_path, enable_ocr=True)
             result = recognize_invoice_text(text, str(file_path))
@@ -139,9 +153,17 @@ def _filter_and_rename_downloads(output_directory: Path) -> int:
             continue
         recognized_files[file_path.name] = (file_path, result)
 
-    # 复用分析汇总相同的配对器：按行程编号优先，其次金额配对。
+    # 直接复用本轮识别结果进行配对，避免再次扫描并 OCR 同一批 PDF。
     paired_invoice_numbers: dict[str, str] = {}
-    for pair in pair_ride_hailing_documents(output_directory, enable_ocr=True):
+    if progress_callback:
+        progress_callback("正在配对网约车发票与行程单")
+    candidates = [
+        candidate
+        for _, (file_path, result) in recognized_files.items()
+        for candidate in [build_ride_hailing_candidate_from_recognition(file_path, result)]
+        if candidate is not None
+    ]
+    for pair in pair_ride_hailing_candidates(candidates):
         invoice_item = recognized_files.get(pair.invoice_file)
         if invoice_item is not None and invoice_item[1].number:
             paired_invoice_numbers[pair.itinerary_file] = invoice_item[1].number
@@ -149,7 +171,9 @@ def _filter_and_rename_downloads(output_directory: Path) -> int:
     toll_itinerary_matches = _match_toll_itineraries(recognized_files)
 
     retained_count = 0
-    for source_file, (file_path, result) in recognized_files.items():
+    for index, (source_file, (file_path, result)) in enumerate(recognized_files.items(), start=1):
+        if progress_callback:
+            progress_callback(f"正在重命名发票：{index}/{len(recognized_files)}")
         toll_number, toll_amount = toll_itinerary_matches.get(source_file, ("", 0.0))
         number = paired_invoice_numbers.get(source_file, toll_number or result.number)
         total_amount = toll_amount if toll_number and toll_amount > 0 else result.total_amount
@@ -176,6 +200,8 @@ def fetch_qq_invoice_attachments(
     authorization_code: str,
     start_date: date,
     end_date: date,
+    output_base_directory: Union[str, Path],
+    progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[Path, int]:
     """按收件日期（闭区间）抓取 QQ 邮箱中的 PDF 发票附件。"""
     if start_date > end_date:
@@ -183,7 +209,10 @@ def fetch_qq_invoice_attachments(
     if not account or not authorization_code:
         raise ValueError("请填写 QQ 邮箱账号和 IMAP 授权码。")
 
-    output_directory = Path.home() / "Desktop" / f"发票{start_date:%Y-%m-%d}至{end_date:%Y-%m-%d}"
+    output_base_path = Path(output_base_directory).expanduser()
+    if output_base_path.exists() and not output_base_path.is_dir():
+        raise ValueError("保存位置必须是文件夹。")
+    output_directory = output_base_path / f"发票{start_date:%Y-%m-%d}至{end_date:%Y-%m-%d}"
     if output_directory.exists():
         shutil.rmtree(output_directory)
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -202,7 +231,12 @@ def fetch_qq_invoice_attachments(
         if status != "OK":
             raise RuntimeError("无法查询指定日期范围内的邮件。")
 
-        for uid_bytes in data[0].split():
+        mail_uids = data[0].split()
+        if progress_callback:
+            progress_callback(f"正在下载邮件附件：0/{len(mail_uids)}")
+        for index, uid_bytes in enumerate(mail_uids, start=1):
+            if progress_callback:
+                progress_callback(f"正在下载邮件附件：{index}/{len(mail_uids)}")
             uid = uid_bytes.decode("ascii", errors="ignore")
             status, message_data = client.uid("FETCH", uid, "(RFC822)")
             if status != "OK" or not message_data:
@@ -243,5 +277,5 @@ def fetch_qq_invoice_attachments(
         except Exception:
             pass
 
-    retained_count = _filter_and_rename_downloads(output_directory)
+    retained_count = _filter_and_rename_downloads(output_directory, progress_callback)
     return output_directory, retained_count

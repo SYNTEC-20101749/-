@@ -205,13 +205,20 @@ def extract_toll_line_amounts(text: str) -> tuple[float, float, str] | None:
     if not tax_rate_match:
         return None
 
+    # 税额位于税率列之后、底部“合计 / 价税合计”之前。若不截断，扫描顺序
+    # 会把价税合计 22.66 一并作为税额候选，进而错误推导出 22.00 元总额。
+    tax_text = item_text[tax_rate_match.end():]
+    total_label_match = re.search(r"(?:价\s*税\s*合\s*计|合\s*计|小\s*写)", tax_text)
+    if total_label_match:
+        tax_text = tax_text[:total_label_match.start()]
+
     amount_values = [
         parse_numeric_value(match.group(0))
         for match in re.finditer(r"\d+\s*\.\s*\d{1,2}", item_text[:tax_rate_match.start()])
     ]
     tax_values = [
         parse_numeric_value(match.group(0))
-        for match in re.finditer(r"\d+\s*\.\s*\d{1,2}", item_text[tax_rate_match.end():])
+        for match in re.finditer(r"\d+\s*\.\s*\d{1,2}", tax_text)
     ]
     upper_bound = get_money_upper_bound("高速通行票")
     amount = next((value for value in reversed(amount_values) if 0 < value <= upper_bound), 0.0)
@@ -277,11 +284,61 @@ def extract_lodging_line_amounts(text: str) -> tuple[float, float, str] | None:
     return None
 
 
+def extract_ride_hailing_invoice_line_amounts(text: str) -> tuple[float, float, str] | None:
+    """从网约车电子发票项目行提取不含税金额和税额。
+
+    部分电子发票 OCR 会将底部“价税合计（小写）”标签拆散，导致常规总额
+    规则无法命中。项目行通常仍保留“客运服务费 22.00 3% 0.66”的结构，
+    可据此可靠重建价税合计。发生优惠抵扣时，一张票会有正、负两条客运
+    服务项目，必须逐条汇总，不能只取首条项目金额。
+    """
+    item_pattern = re.compile(
+        r"(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)(?P<detail>[\s\S]{0,240}?)(?=(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)|合\s*计|价\s*税\s*合\s*计|$)",
+        re.IGNORECASE,
+    )
+    upper_bound = get_money_upper_bound("网约车")
+    money_pattern = re.compile(r"(?<![\d.])-?\d+\s*\.\s*\d{1,2}(?![\d.])")
+    line_amounts: list[float] = []
+    line_tax_amounts: list[float] = []
+
+    for item_match in item_pattern.finditer(text):
+        item_text = item_match.group("detail")
+        tax_rate_match = re.search(r"\d+(?:\s*\.\s*\d+)?\s*%", item_text)
+        if not tax_rate_match:
+            continue
+
+        amount_values = [
+            parse_numeric_value(match.group(0))
+            for match in money_pattern.finditer(item_text[:tax_rate_match.start()])
+        ]
+        tax_values = [
+            parse_numeric_value(match.group(0))
+            for match in money_pattern.finditer(item_text[tax_rate_match.end():])
+        ]
+        if not amount_values or not tax_values:
+            continue
+
+        line_amount = amount_values[-1]
+        line_tax_amount = tax_values[0]
+        if abs(line_amount) <= upper_bound and abs(line_tax_amount) <= upper_bound:
+            line_amounts.append(line_amount)
+            line_tax_amounts.append(line_tax_amount)
+
+    if not line_amounts:
+        return None
+
+    return round(sum(line_amounts), 2), round(sum(line_tax_amounts), 2), "网约车项目行金额税额汇总"
+
+
 def extract_ride_itinerary_amounts(text: str) -> tuple[float, float, float, str] | None:
     patterns = [
         (
             "网约车行程单合计",
-            re.compile(r"(?:共计|合计)\s*(?:\d+)\s*单行程[^0-9]{0,8}([0-9]+(?:\.[0-9]{1,2})?)\s*元"),
+            re.compile(r"(?:共计|合计)\s*(?:\d+)\s*单行程[^0-9]{0,16}([0-9]+(?:\s*\.\s*[0-9]{1,2})?)\s*元"),
+        ),
+        (
+            "高德行程单合计",
+            re.compile(r"共计\s*\d+\s*单行程[，,、；;：:\s]*(?:合计|总计)?\s*([0-9]+(?:\s*\.\s*[0-9]{1,2})?)\s*元", re.IGNORECASE),
         ),
         (
             "网约车行程单金额合计",
@@ -390,10 +447,40 @@ def extract_ride_trip_times(text: str) -> tuple[str, str]:
 
 
 def derive_invoice_category(text: str, attachment_name: str, vendor: str) -> str:
+    # 高德行程单在配对重命名后也会使用对应的 20 位发票号码，因此必须先看
+    # 票面标题；“高德地图—打车—行程单 / AMAP ITINERARY”是行程单强特征。
+    if re.search(r"(?:高德地图.{0,12}打车.{0,12}行程单|AMAP\s+ITINERARY)", text, re.IGNORECASE):
+        return "网约车行程单"
+
+    # 部分打车平台会把电子发票附件命名为“发票号码-金额-行程单.pdf”。
+    # 票面明确是电子发票且包含客运服务项目时，应以票面内容为准，不能被
+    # 文件名中的“行程单”误判，否则两份文件都会成为行程单而无法配对。
+    # OCR 偶尔会漏掉标题时，16/20 位电子发票号码也能明确区分该类附件；
+    # 真正的高德行程单不包含电子发票号码。
+    if re.search(r"(?<!\d)(?:\d{16}|\d{20})[-_]\d+(?:\.\d{1,2})?(?:[-_])?行程单", attachment_name):
+        return "网约车"
+
+    if re.search(r"(?:电子发票|全电发票|数电发票)", text, re.IGNORECASE) and re.search(
+        r"(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "网约车"
+
     corpus = f"{text} {attachment_name} {vendor}"
     rules: list[tuple[re.Pattern[str], str]] = [
         (
-            re.compile(r"(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务).{0,80}行程单|行程单.{0,80}(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务)", re.IGNORECASE),
+            re.compile(
+                r"(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务).{0,100}汇总单|汇总单.{0,100}(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务)",
+                re.IGNORECASE,
+            ),
+            "高速通行费行程单",
+        ),
+        (
+            re.compile(
+                r"(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务).{0,100}行程单|行程单.{0,100}(?:通行费|高速|收费公路|etc|过路费|车辆通行服务|通行服务)",
+                re.IGNORECASE,
+            ),
             "高速通行费行程单",
         ),
         (re.compile(r"(行程单|AMAP\s+ITINERARY|高德地图.*打车|滴滴.*行程单)", re.IGNORECASE), "网约车行程单"),
@@ -585,11 +672,55 @@ def extract_invoice_number(text: str) -> tuple[str, str]:
     return "", "未命中"
 
 
+def extract_tax_inclusive_total(text: str) -> tuple[float, str]:
+    """定向提取票面“价税合计（小写）”的含税金额。
+
+    电子发票的 PDF 文本层经常按坐标而非视觉顺序输出，通用金额规则在
+    “价税合计”附近跨越到项目明细时，可能误取数量 1 或某项金额。此处只
+    接受该标签后紧邻的人民币金额，作为网约车发票的最高优先级总额来源。
+    """
+    label_pattern = r"价\s*税\s*合\s*计\s*(?:[（(]\s*小\s*写\s*[）)])?"
+    money_pattern = r"([0-9][0-9,\s]*(?:\s*\.\s*[0-9]{1,2})?)"
+    patterns = [
+        (
+            "价税合计小写人民币金额",
+            re.compile(rf"{label_pattern}\s*[:：]?\s*[¥￥]\s*{money_pattern}"),
+        ),
+        (
+            "价税合计小写邻近人民币金额",
+            re.compile(rf"{label_pattern}[^¥￥0-9]{{0,48}}[¥￥]\s*{money_pattern}"),
+        ),
+        (
+            "价税合计小写邻近小数金额",
+            re.compile(rf"{label_pattern}[^0-9]{{0,48}}([0-9]+\s*\.\s*[0-9]{{1,2}})"),
+        ),
+        (
+            "价税合计小写前置人民币金额",
+            re.compile(rf"[¥￥]\s*{money_pattern}[^¥￥0-9]{{0,48}}{label_pattern}"),
+        ),
+    ]
+    return extract_numeric_field(text, patterns)
+
+
+def extract_invoice_tax_rate(text: str) -> float:
+    """提取发票项目行的税率，用于项目金额文字层缺失时反算税额。"""
+    item_match = re.search(
+        r"(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)[\s\S]{0,240}?(\d+(?:\s*\.\s*\d+)?)\s*%",
+        text,
+        re.IGNORECASE,
+    )
+    if not item_match:
+        return 0.0
+    tax_rate = parse_numeric_value(item_match.group(1)) / 100
+    return tax_rate if 0 < tax_rate <= 0.2 else 0.0
+
+
 def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionResult:
     compact_text = normalize_text(text)
     date_match = re.search(r"(20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", compact_text)
     fallback_year = int(re.search(r"20\d{2}", date_match.group(1)).group()) if date_match else None
     lodging_line_amounts = extract_lodging_line_amounts(compact_text)
+    ride_hailing_invoice_line_amounts = extract_ride_hailing_invoice_line_amounts(compact_text)
     toll_line_amounts = extract_toll_line_amounts(compact_text)
     toll_itinerary_amount, toll_itinerary_amount_rule = extract_toll_itinerary_amount(compact_text)
     ride_itinerary_amounts = extract_ride_itinerary_amounts(compact_text)
@@ -608,6 +739,12 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
             ("票价直接命中", re.compile(rf"票价\s*[:：]?\s*[¥￥]?\s*{MONEY_PATTERN}")),
             ("票价邻近货币符号", re.compile(rf"票价[^0-9¥￥]{{0,12}}[¥￥]\s*{MONEY_PATTERN}")),
             (
+                "价税合计小写金额",
+                re.compile(
+                    rf"价\s*税\s*合\s*计[\s\S]{{0,96}}?(?:\(\s*小\s*写\s*\)|（\s*小\s*写\s*）|小\s*写)[^0-9¥￥]{{0,16}}[¥￥]?\s*{MONEY_PATTERN}"
+                ),
+            ),
+            (
                 "价税合计直接命中",
                 re.compile(rf"(?:价税合计(?:\(小写\)|（小写）)?|合计金额|小写|票价)\s*[:：]?\s*[¥￥]?\s*{MONEY_PATTERN}"),
             ),
@@ -617,6 +754,10 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
             ),
         ],
     )
+    tax_inclusive_total, tax_inclusive_total_rule = extract_tax_inclusive_total(compact_text)
+    if tax_inclusive_total > 0:
+        total_amount = tax_inclusive_total
+        total_rule = tax_inclusive_total_rule
     tax_amount, tax_rule = extract_numeric_field(
         compact_text,
         [
@@ -643,6 +784,20 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     buyer_tax_id = extract_buyer_tax_id(compact_text)
     lodging_invoice_type = derive_lodging_invoice_type(compact_text, category)
 
+    # 一张网约车电子发票中，带“￥/¥”的金额通常包括不含税金额、税额及
+    # 价税合计；其中最大值必然是价税合计。PDF 坐标乱序导致“价税合计”
+    # 标签与金额无法相邻时，以该规则作为可靠兜底。
+    currency_total_candidates = [
+        candidate
+        for candidate in extract_currency_candidates(compact_text)
+        if sanitize_money_value(candidate, category) > 0
+    ]
+    if category == "网约车" and currency_total_candidates:
+        maximum_currency_amount = currency_total_candidates[0]
+        if total_amount <= 0 or maximum_currency_amount > total_amount:
+            total_amount = maximum_currency_amount
+            total_rule = "网约车人民币金额最大值（价税合计候选）"
+
     if toll_line_amounts and category == "高速通行票":
         amount = toll_line_amounts[0]
         tax_amount = toll_line_amounts[1]
@@ -651,14 +806,38 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
         tax_rule = toll_line_amounts[2]
         total_rule = "高速通行费金额加税额推导"
 
+    if ride_hailing_invoice_line_amounts and category == "网约车":
+        amount = ride_hailing_invoice_line_amounts[0]
+        tax_amount = ride_hailing_invoice_line_amounts[1]
+        amount_rule = ride_hailing_invoice_line_amounts[2]
+        tax_rule = ride_hailing_invoice_line_amounts[2]
+        # 票面“价税合计”是法定含税总额，优先级高于项目行累加结果。项目
+        # 行可能包含优惠抵扣、折行或 OCR 漏读，不能反向覆盖价税合计。
+        has_explicit_invoice_total = total_rule.startswith("价税合计")
+        if tax_amount > 0 and not has_explicit_invoice_total:
+            total_amount = round(amount + tax_amount, 2)
+            total_rule = "网约车金额加税额推导"
+        elif not total_amount:
+            total_amount = amount
+            total_rule = "网约车项目行金额"
+
+    if category == "网约车" and total_amount > 0 and amount <= 0:
+        tax_rate = extract_invoice_tax_rate(compact_text)
+        if tax_rate:
+            amount = round(total_amount / (1 + tax_rate), 2)
+            tax_amount = round(total_amount - amount, 2)
+            amount_rule = "价税合计按税率反算金额"
+            tax_rule = "价税合计按税率反算税额"
+
     if ride_itinerary_amounts and category == "网约车行程单":
-        total_amount = total_amount or ride_itinerary_amounts[0]
-        amount = amount if amount > 1 else ride_itinerary_amounts[1]
-        tax_amount = tax_amount or ride_itinerary_amounts[2]
-        if total_rule == "未命中":
-            total_rule = ride_itinerary_amounts[3]
-        if amount_rule == "未命中" or amount <= 1:
-            amount_rule = ride_itinerary_amounts[3]
+        # 行程单“共计…单行程，合计 xx.xx 元”是实际支付总额。PDF 文本层
+        # 可能从文件名或明细表头先读到旧金额，不能让这些候选值覆盖合计。
+        total_amount = ride_itinerary_amounts[0]
+        amount = ride_itinerary_amounts[1]
+        tax_amount = ride_itinerary_amounts[2]
+        total_rule = ride_itinerary_amounts[3]
+        amount_rule = ride_itinerary_amounts[3]
+        tax_rule = ride_itinerary_amounts[3]
 
     if category == "高速通行费行程单" and toll_itinerary_amount > 0:
         total_amount = toll_itinerary_amount
@@ -670,7 +849,21 @@ def recognize_invoice_text(text: str, source_file: str) -> InvoiceRecognitionRes
     total_amount = sanitize_money_value(total_amount, category)
     tax_amount = sanitize_money_value(tax_amount, category)
     amount = sanitize_money_value(amount, category)
-    total_amount, amount, tax_amount, total_corrected = reconcile_amounts(total_amount, amount, tax_amount, category)
+    missing_ride_tax_with_total = (
+        category == "网约车" and tax_amount == 0 and amount > 0 and total_amount > amount
+    )
+    # “价税合计”通常最可靠，但 PDF 坐标乱序时也可能误取数量 1.00。
+    # 若其小于已识别的项目金额加税额，则该值不可能是含税总额，恢复一致性
+    # 校验以避免将 1.00 作为二十多元网约车发票的总额。
+    has_explicit_ride_hailing_total = (
+        category == "网约车"
+        and total_rule.startswith("价税合计")
+        and (amount <= 0 or tax_amount < 0 or approximately_equal(total_amount, round(amount + tax_amount, 2)))
+    )
+    if missing_ride_tax_with_total or has_explicit_ride_hailing_total:
+        total_corrected = False
+    else:
+        total_amount, amount, tax_amount, total_corrected = reconcile_amounts(total_amount, amount, tax_amount, category)
     if total_corrected:
         total_rule = "金额加税额一致性校正"
     currency_candidates = [

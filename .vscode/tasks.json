@@ -255,6 +255,20 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Build SYNTEC Invoice Manager v1.0.10",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-File",
+				"${workspaceFolder}\\build_release_v1_0_10.ps1"
+			],
+			"isBackground": false,
+			"group": "build"
 		}
 	],
 	"inputs": [

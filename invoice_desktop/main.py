@@ -66,25 +66,29 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.9"
-APP_RELEASE_DATE = "2026-08-18"
+APP_VERSION = "1.0.10"
+APP_RELEASE_DATE = "2026-08-20"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
 MAIL_ACCOUNT_SETTING = "mailFetch/account"
 MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
+MAIL_OUTPUT_DIRECTORY_SETTING = "mailFetch/outputDirectory"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 REIMBURSEMENT_BLINK_SETTING = "reimbursementReminder/blinkEnabled"
 UI_CONFIG_FILE_NAME = "ui_config.txt"
 MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME = "show_mail_fetch_button"
-VSCODE_EXECUTABLE_LOCATIONS = (
-    Path.home() / "AppData" / "Local" / "Programs" / "Microsoft VS Code" / "Code.exe",
-    Path(r"C:\Program Files\Microsoft VS Code\Code.exe"),
-    Path(r"C:\Program Files (x86)\Microsoft VS Code\Code.exe"),
-)
 VERSION_UPDATES = [
     (
-        "v1.0.9（2026-08-18，当前版本）",
+        "v1.0.10（2026-08-20，当前版本）",
+        [
+            "邮箱发票抓取不再要求安装 VS Code，可在一般 Windows 电脑上独立使用。",
+            "无法取得发票号码的票据，重命名文件名会加入【异常需人工符合】标识，方便人工复核。",
+            "优化邮箱抓取流程：复用识别结果与 OCR 引擎，并显示下载、识别、配对和重命名进度。",
+        ],
+    ),
+    (
+        "v1.0.9（2026-08-18）",
         [
             "新增报销周期提醒闪烁开关，可在“设定 → 报销周期闪烁设定”弹窗中开启或关闭。",
             "优化高速通行费行程单金额识别、购方税号识别与异常提示。",
@@ -391,13 +395,15 @@ class OrganizeWorker(QThread):
 class MailFetchWorker(QThread):
     completed = pyqtSignal(str, int)
     failed = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
-    def __init__(self, account: str, authorization_code: str, start_date, end_date) -> None:
+    def __init__(self, account: str, authorization_code: str, start_date, end_date, output_base_directory: str) -> None:
         super().__init__()
         self.account = account
         self.authorization_code = authorization_code
         self.start_date = start_date
         self.end_date = end_date
+        self.output_base_directory = output_base_directory
 
     def run(self) -> None:
         try:
@@ -406,6 +412,8 @@ class MailFetchWorker(QThread):
                 authorization_code=self.authorization_code,
                 start_date=self.start_date,
                 end_date=self.end_date,
+                output_base_directory=self.output_base_directory,
+                progress_callback=self.progress.emit,
             )
             self.completed.emit(str(output_directory), copied_count)
         except Exception as error:
@@ -419,15 +427,20 @@ class MailInvoiceFetchDialog(QDialog):
         self.setWindowTitle("邮箱发票抓取")
         self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
-        notice = QLabel("此功能需要电脑有安装 VSCODE 2022 版本，且有配置AI环境。")
-        notice.setStyleSheet("color: #C62828; font-weight: 700;")
-        layout.addWidget(notice)
-        layout.addWidget(QLabel("通过 QQ 邮箱 IMAP 安全抓取；授权码使用 Windows 当前用户加密保存。"))
+        layout.addWidget(QLabel("通过 QQ 邮箱 IMAP 安全抓取；无需安装 VS Code。授权码使用 Windows 当前用户加密保存。"))
 
         form = QFormLayout()
         self.account_input = QLineEdit(str(settings.value(MAIL_ACCOUNT_SETTING, "") or ""))
         self.auth_code_input = QLineEdit(unprotect_secret(str(settings.value(MAIL_AUTH_CODE_SETTING, "") or "")))
         self.auth_code_input.setEchoMode(QLineEdit.Password)
+        self.output_directory_input = QLineEdit(
+            str(settings.value(MAIL_OUTPUT_DIRECTORY_SETTING, str(Path.home() / "Desktop")) or str(Path.home() / "Desktop"))
+        )
+        self.choose_output_directory_button = QPushButton("选择文件夹")
+        self.choose_output_directory_button.clicked.connect(self.choose_output_directory)
+        output_directory_row = QHBoxLayout()
+        output_directory_row.addWidget(self.output_directory_input, 1)
+        output_directory_row.addWidget(self.choose_output_directory_button)
         self.start_date_input = QDateEdit(QDate.currentDate())
         self.end_date_input = QDateEdit(QDate.currentDate())
         for date_input in (self.start_date_input, self.end_date_input):
@@ -435,10 +448,11 @@ class MailInvoiceFetchDialog(QDialog):
             date_input.setDisplayFormat("yyyy-MM-dd")
         form.addRow("QQ 邮箱账号：", self.account_input)
         form.addRow("IMAP 授权码：", self.auth_code_input)
+        form.addRow("保存位置：", output_directory_row)
         form.addRow("抓取起始日期：", self.start_date_input)
         form.addRow("抓取结束日期：", self.end_date_input)
         layout.addLayout(form)
-        layout.addWidget(QLabel("日期范围为左闭右闭；将生成桌面“发票起始日期至结束日期”文件夹。"))
+        layout.addWidget(QLabel("日期范围为左闭右闭；将在保存位置下生成“发票起始日期至结束日期”文件夹。"))
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Ok).setText("确认抓取")
         self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
@@ -458,35 +472,38 @@ class MailInvoiceFetchDialog(QDialog):
         return (
             self.account_input.text().strip(),
             self.auth_code_input.text(),
+            self.output_directory_input.text().strip(),
             self.start_date_input.date().toPyDate(),
             self.end_date_input.date().toPyDate(),
         )
 
-    @staticmethod
-    def is_vscode_installed() -> bool:
-        """检测 Visual Studio Code 是否已安装，兼容用户安装和系统安装。"""
-        if shutil.which("code") or shutil.which("Code.exe"):
-            return True
-        return any(executable.is_file() for executable in VSCODE_EXECUTABLE_LOCATIONS)
+    def choose_output_directory(self) -> None:
+        selected_directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择发票保存位置",
+            self.output_directory_input.text().strip() or str(Path.home() / "Desktop"),
+        )
+        if selected_directory:
+            self.output_directory_input.setText(selected_directory)
 
     def accept(self) -> None:
-        account, authorization_code, start_date, end_date = self.values()
-        if not self.is_vscode_installed():
-            QMessageBox.warning(
-                self,
-                "未检测到 VS Code",
-                "此电脑未检测到 Visual Studio Code（VSCODE 2022）。\n"
-                "请先安装并完成 AI 环境配置后，再执行邮箱发票抓取。",
-            )
-            return
+        account, authorization_code, output_base_directory, start_date, end_date = self.values()
         if not account or not authorization_code:
             QMessageBox.warning(self, "信息不完整", "请填写 QQ 邮箱账号和 IMAP 授权码。")
+            return
+        if not output_base_directory:
+            QMessageBox.warning(self, "信息不完整", "请选择或填写发票保存位置。")
+            return
+        output_base_path = Path(output_base_directory).expanduser()
+        if output_base_path.exists() and not output_base_path.is_dir():
+            QMessageBox.warning(self, "保存位置错误", "保存位置必须是文件夹。")
             return
         if start_date > end_date:
             QMessageBox.warning(self, "日期错误", "起始日期不能晚于结束日期。")
             return
         self.settings.setValue(MAIL_ACCOUNT_SETTING, account)
         self.settings.setValue(MAIL_AUTH_CODE_SETTING, protect_secret(authorization_code))
+        self.settings.setValue(MAIL_OUTPUT_DIRECTORY_SETTING, str(output_base_path))
         self.settings.sync()
         super().accept()
 
@@ -1192,14 +1209,25 @@ class MainWindow(QMainWindow):
         dialog = MailInvoiceFetchDialog(self.settings, self)
         if dialog.exec_() != QDialog.Accepted:
             return
-        account, authorization_code, start_date, end_date = dialog.values()
-        self.mail_fetch_worker = MailFetchWorker(account, authorization_code, start_date, end_date)
+        account, authorization_code, output_base_directory, start_date, end_date = dialog.values()
+        self.mail_fetch_worker = MailFetchWorker(
+            account,
+            authorization_code,
+            start_date,
+            end_date,
+            output_base_directory,
+        )
         self.mail_fetch_worker.completed.connect(self._on_mail_fetch_completed)
         self.mail_fetch_worker.failed.connect(self._on_mail_fetch_failed)
+        self.mail_fetch_worker.progress.connect(self._on_mail_fetch_progress)
         self.mail_fetch_worker.finished.connect(self._on_mail_fetch_finished)
         self._set_busy(True)
         self.phase_label.setText("当前状态：正在抓取 QQ 邮箱发票，请稍候")
         self.mail_fetch_worker.start()
+
+    def _on_mail_fetch_progress(self, message: str) -> None:
+        self.phase_label.setText(f"当前状态：{message}")
+        self.status_bar.showMessage(message)
 
     def _on_mail_fetch_completed(self, output_directory: str, copied_count: int) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
@@ -1930,11 +1958,49 @@ class MainWindow(QMainWindow):
         elif self.current_result is not None and self.current_result.applied:
             self.status_bar.showMessage("补贴、在途或出租车费用已修改，请点击“确认补贴/出租车”更新打印汇总清单。")
 
+    @staticmethod
+    def _get_detail_display_records(result: InvoiceOrganizeResult):
+        """让已配对的网约车发票与行程单在明细表中连续显示。"""
+        record_by_source_file = {record.source_file: record for record in result.records}
+        itinerary_by_invoice_file = {}
+        paired_invoice_by_itinerary_file = {}
+
+        for pair in result.ride_hailing_pairs:
+            invoice_record = record_by_source_file.get(pair.invoice_file)
+            itinerary_record = record_by_source_file.get(pair.itinerary_file)
+            if invoice_record is None or itinerary_record is None:
+                continue
+            if invoice_record.category != "网约车" or itinerary_record.category != "网约车行程单":
+                continue
+            itinerary_by_invoice_file[invoice_record.source_file] = itinerary_record
+            paired_invoice_by_itinerary_file[itinerary_record.source_file] = invoice_record
+
+        ordered_records = []
+        displayed_itinerary_files = set()
+        for record in result.records:
+            if record.source_file in displayed_itinerary_files:
+                continue
+
+            ordered_records.append(record)
+            itinerary_record = itinerary_by_invoice_file.get(record.source_file)
+            if itinerary_record is not None:
+                ordered_records.append(itinerary_record)
+                displayed_itinerary_files.add(itinerary_record.source_file)
+
+        return ordered_records, paired_invoice_by_itinerary_file
+
     def _fill_table(self, result: InvoiceOrganizeResult) -> None:
-        self.table.setRowCount(len(result.records))
+        display_records, paired_invoice_by_itinerary_file = self._get_detail_display_records(result)
+        self.table.setRowCount(len(display_records))
         self.table.horizontalHeaderItem(8).setText("重命名文件名" if result.applied else "目标文件名")
 
-        for row_index, record in enumerate(result.records):
+        for row_index, record in enumerate(display_records):
+            paired_invoice = paired_invoice_by_itinerary_file.get(record.source_file)
+            pair_hint = (
+                f"对应网约车发票：{paired_invoice.number or paired_invoice.source_file}"
+                if paired_invoice is not None
+                else ""
+            )
             values = [
                 record.issue_date or "未识别日期",
                 record.category,
@@ -1958,6 +2024,7 @@ class MainWindow(QMainWindow):
                         ),
                         *([f"住宿票种：{record.lodging_invoice_type}"] if record.lodging_invoice_type else []),
                         *([f"购方税号：{record.buyer_tax_id}"] if record.buyer_tax_id else []),
+                        *([pair_hint] if pair_hint else []),
                         *record.warnings,
                     ]
                 ),
