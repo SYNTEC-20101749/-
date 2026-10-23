@@ -452,13 +452,22 @@ def derive_invoice_category(text: str, attachment_name: str, vendor: str) -> str
     if re.search(r"(?:高德地图.{0,12}打车.{0,12}行程单|AMAP\s+ITINERARY)", text, re.IGNORECASE):
         return "网约车行程单"
 
-    # 部分打车平台会把电子发票附件命名为“发票号码-金额-行程单.pdf”。
-    # 票面明确是电子发票且包含客运服务项目时，应以票面内容为准，不能被
-    # 文件名中的“行程单”误判，否则两份文件都会成为行程单而无法配对。
-    # OCR 偶尔会漏掉标题时，16/20 位电子发票号码也能明确区分该类附件；
-    # 真正的高德行程单不包含电子发票号码。
+    # 邮箱抓取完成后，行程单会按“对应发票号码-金额-行程单.pdf”统一命名。
+    # 因此 16/20 位号码本身不能证明附件就是发票；若直接按号码归为网约车
+    # 发票，真实行程单会与同编号发票同时成为 invoice 候选项，无法配对，并
+    # 因缺少发票号码、购方税号而被标为待复核。只有票面同时具备电子发票及
+    # 发票版式字段时，才允许该命名的附件覆盖“行程单”类型。
     if re.search(r"(?<!\d)(?:\d{16}|\d{20})[-_]\d+(?:\.\d{1,2})?(?:[-_])?行程单", attachment_name):
-        return "网约车"
+        has_electronic_invoice_title = re.search(r"(?:电子发票|全电发票|数电发票)", text, re.IGNORECASE)
+        has_invoice_layout = re.search(r"(?:发票号码|购买方|销售方|价税合计|纳税人识别号)", text, re.IGNORECASE)
+        has_ride_service = re.search(
+            r"(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)",
+            text,
+            re.IGNORECASE,
+        )
+        if has_electronic_invoice_title and has_invoice_layout and has_ride_service:
+            return "网约车"
+        return "网约车行程单"
 
     if re.search(r"(?:电子发票|全电发票|数电发票)", text, re.IGNORECASE) and re.search(
         r"(?:交通运输服务|客运服务费|客运服务|网约车服务|出租汽车客运服务)",

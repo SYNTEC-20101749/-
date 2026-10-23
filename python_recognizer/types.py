@@ -133,6 +133,8 @@ class InvoiceOrganizeResult:
     summary: InvoiceOrganizeSummary
     ride_hailing_pairs: list[RideHailingPairResult]
     records: list[InvoiceOrganizeRecord]
+    # 仅供生成出差清单使用，不替换原始汇总，也不改变既有 JSON 输出。
+    trip_daily_breakdown: list[InvoiceDateSummary] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {

@@ -14,7 +14,8 @@ except ImportError:
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PyQt5.QtCore import QDate, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+import PyQt5
+from PyQt5.QtCore import QCoreApplication, QDate, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QKeySequence
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt5.QtWidgets import (
@@ -43,6 +44,7 @@ from PyQt5.QtWidgets import (
     QStatusBar,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -66,21 +68,51 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.10"
-APP_RELEASE_DATE = "2026-08-20"
+APP_VERSION = "1.0.14"
+APP_RELEASE_DATE = "2026-10-23"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
 MAIL_ACCOUNT_SETTING = "mailFetch/account"
 MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
 MAIL_OUTPUT_DIRECTORY_SETTING = "mailFetch/outputDirectory"
+HOME_SOURCE_DIRECTORY_SETTING = "workspace/sourceDirectory"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 REIMBURSEMENT_BLINK_SETTING = "reimbursementReminder/blinkEnabled"
 UI_CONFIG_FILE_NAME = "ui_config.txt"
 MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME = "show_mail_fetch_button"
 VERSION_UPDATES = [
     (
-        "v1.0.10（2026-08-20，当前版本）",
+        "v1.0.14（2026-10-23，当前版本）",
+        [
+            "出差清单中的网约车费用按配对行程单的逐笔日期与金额拆分，同一天的多笔行程自动累加。",
+            "高铁等其他大众运输费用沿用原累加规则，发票明细、重命名及 Excel 归档保持不变。",
+            "行程明细不完整或金额不一致时保留原金额分配，避免漏计或重复计费。",
+        ],
+    ),
+    (
+        "v1.0.13（2026-10-10）",
+        [
+            "修复中文路径下 Qt 平台插件查找问题，提升桌面程序启动可靠性。",
+            "QQ 邮箱抓取完成后自动分析发票并生成【汇总合成】PDF。",
+            "邮箱抓取目录同步到首页并记忆，下次启动后仍可继续分析、打印、归档和上传。",
+        ],
+    ),
+    (
+        "v1.0.12（2026-08-27）",
+        [
+            "新增可选的内网使用统计后台，记录启动、分析和打印次数，不上传发票内容、金额、路径或邮箱凭据。",
+        ],
+    ),
+    (
+        "v1.0.11（2026-08-21）",
+        [
+            "邮箱发票抓取的 IMAP 授权码输入栏新增提示图标，可查看 QQ 邮箱开启服务和获取授权码的操作指引。",
+            "邮箱发票抓取入口默认显示，首次使用时可直接配置 QQ 邮箱账号和 IMAP 授权码。",
+        ],
+    ),
+    (
+        "v1.0.10（2026-08-20）",
         [
             "邮箱发票抓取不再要求安装 VS Code，可在一般 Windows 电脑上独立使用。",
             "无法取得发票号码的票据，重命名文件名会加入【异常需人工符合】标识，方便人工复核。",
@@ -436,6 +468,16 @@ class MailInvoiceFetchDialog(QDialog):
         self.output_directory_input = QLineEdit(
             str(settings.value(MAIL_OUTPUT_DIRECTORY_SETTING, str(Path.home() / "Desktop")) or str(Path.home() / "Desktop"))
         )
+        self.auth_code_help_button = QToolButton()
+        self.auth_code_help_button.setText("ⓘ")
+        self.auth_code_help_button.setToolTip("查看 QQ 邮箱授权码获取方法")
+        self.auth_code_help_button.setAccessibleName("授权码获取方法")
+        self.auth_code_help_button.setFixedWidth(42)
+        self.auth_code_help_button.clicked.connect(self.show_auth_code_help)
+        auth_code_row = QHBoxLayout()
+        auth_code_row.setContentsMargins(0, 0, 0, 0)
+        auth_code_row.addWidget(self.auth_code_input, 1)
+        auth_code_row.addWidget(self.auth_code_help_button)
         self.choose_output_directory_button = QPushButton("选择文件夹")
         self.choose_output_directory_button.clicked.connect(self.choose_output_directory)
         output_directory_row = QHBoxLayout()
@@ -447,7 +489,7 @@ class MailInvoiceFetchDialog(QDialog):
             date_input.setCalendarPopup(True)
             date_input.setDisplayFormat("yyyy-MM-dd")
         form.addRow("QQ 邮箱账号：", self.account_input)
-        form.addRow("IMAP 授权码：", self.auth_code_input)
+        form.addRow("IMAP 授权码：", auth_code_row)
         form.addRow("保存位置：", output_directory_row)
         form.addRow("抓取起始日期：", self.start_date_input)
         form.addRow("抓取结束日期：", self.end_date_input)
@@ -467,6 +509,29 @@ class MailInvoiceFetchDialog(QDialog):
         footer_row.addStretch(1)
         footer_row.addWidget(self.buttons)
         layout.addLayout(footer_row)
+
+    def show_auth_code_help(self) -> None:
+        """显示 QQ 邮箱开启服务并生成 IMAP 授权码的操作指引。"""
+        message = QMessageBox(self)
+        message.setWindowTitle("QQ 邮箱授权码获取方法")
+        message.setIcon(QMessageBox.Information)
+        message.setTextFormat(Qt.RichText)
+        message.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        message.setText(
+            "<b>请在 QQ 邮箱网页版中完成以下操作：</b>"
+            "<ol>"
+            "<li>打开 <a href='https://mail.qq.com'>QQ 邮箱</a> 并登录。</li>"
+            "<li>点击右上角“设置”，进入“账号”页面。</li>"
+            "<li>找到“POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务”设置区域。</li>"
+            "<li>开启该区域中的“IMAP/SMTP服务”（若页面提示，按要求完成安全验证）。</li>"
+            "<li>点击“生成授权码”或按页面提示获取授权码，将其复制到本窗口的“IMAP 授权码”栏位。</li>"
+            "</ol>"
+            "<p><b>注意：</b>这里填写的是 QQ 邮箱授权码，不是 QQ 登录密码。"
+            "本程序通过 IMAP 读取邮件，账号和授权码会使用 Windows 当前用户加密保存。</p>"
+        )
+        for label in message.findChildren(QLabel):
+            label.setOpenExternalLinks(True)
+        message.exec_()
 
     def values(self):
         return (
@@ -634,6 +699,7 @@ class MainWindow(QMainWindow):
         self.current_result: Optional[InvoiceOrganizeResult] = None
         self.worker: Optional[OrganizeWorker] = None
         self.mail_fetch_worker: Optional[MailFetchWorker] = None
+        self.mail_fetch_followup_pending = False
         self.print_worker: Optional[PrintWorker] = None
         self.print_progress_dialog: Optional[QProgressDialog] = None
         self.current_print_task_label = "打印任务"
@@ -641,8 +707,13 @@ class MainWindow(QMainWindow):
         self.default_directory = str(Path.home() / "Desktop")
         self.manual_summary_source_directory = str(Path.home() / "Desktop" / "手动汇总")
         self.manual_output_directory = str(Path.home() / "Desktop" / "手动汇总清单输出")
-        self.selected_directory = self.default_directory
         self.settings = QSettings("SYNTEC", "InvoiceManager")
+        saved_directory = str(self.settings.value(HOME_SOURCE_DIRECTORY_SETTING, "") or "").strip()
+        self.selected_directory = (
+            saved_directory
+            if saved_directory and Path(saved_directory).is_dir()
+            else self.default_directory
+        )
         self.selected_printer_name = self._load_selected_printer_name()
         self.reimbursement_blink_enabled = self._is_reimbursement_blink_enabled()
         self.date_manual_values: dict[str, tuple[str, float, float]] = {}
@@ -668,6 +739,8 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(self._build_header())
         root_layout.addWidget(self._build_action_group())
+        if self.selected_directory != self.default_directory:
+            self._set_selected_directory(self.selected_directory)
         self.date_summary_group = self._build_date_summary_group()
         self.date_summary_group.hide()
         root_layout.addWidget(self.date_summary_group)
@@ -1176,11 +1249,17 @@ class MainWindow(QMainWindow):
         initial_directory = self.selected_directory or self.default_directory
         selected_directory = QFileDialog.getExistingDirectory(self, "选择待整理发票目录", initial_directory)
         if selected_directory:
-            self.selected_directory = selected_directory
-            self.directory_status_label.setText(f"已选择：{Path(selected_directory).name}")
+            self._set_selected_directory(selected_directory)
             self._reset_result_views()
             self._update_action_buttons()
             self.phase_label.setText("当前状态：目录已切换，请重新执行分析汇总")
+
+    def _set_selected_directory(self, directory: str) -> None:
+        self.selected_directory = str(Path(directory).expanduser())
+        self.directory_status_label.setText(f"已选择：{Path(self.selected_directory).name}")
+        self.directory_status_label.setToolTip(self.selected_directory)
+        self.settings.setValue(HOME_SOURCE_DIRECTORY_SETTING, self.selected_directory)
+        self.settings.sync()
 
     def analyze_directory(self) -> None:
         directory = self.selected_directory.strip()
@@ -1230,9 +1309,22 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(message)
 
     def _on_mail_fetch_completed(self, output_directory: str, copied_count: int) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
-        self.phase_label.setText(f"当前状态：已抓取 {copied_count} 个发票 PDF")
-        QMessageBox.information(self, "抓取完成", f"已抓取 {copied_count} 个 PDF 发票：\n{output_directory}")
+        # 将首页目录同步到本次实际存放发票的日期子目录，而不是保存位置的父目录。
+        # 后续手动“分析汇总”会直接处理此目录；成功的自动整理也会更新 current_result，
+        # 使打印、归档和上传等功能继续针对本次邮箱抓取结果工作。
+        self._set_selected_directory(output_directory)
+        self._reset_result_views()
+
+        if copied_count <= 0:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
+            self.phase_label.setText("当前状态：抓取完成，没有可整理的发票 PDF")
+            QMessageBox.information(self, "抓取完成", f"没有抓取到可整理的发票 PDF。\n保存目录：{output_directory}")
+            return
+
+        self.mail_fetch_followup_pending = True
+        self._run_worker(directory=output_directory, apply_changes=True, existing_result=None)
+        self.phase_label.setText(f"当前状态：已抓取 {copied_count} 个 PDF，正在自动分析并生成汇总合成 PDF")
+        self.status_bar.showMessage("邮箱发票抓取完成，正在自动分析汇总并生成汇总合成 PDF…")
 
     def _on_mail_fetch_failed(self, message: str) -> None:
         self.phase_label.setText("当前状态：邮箱发票抓取失败")
@@ -1240,7 +1332,8 @@ class MainWindow(QMainWindow):
 
     def _on_mail_fetch_finished(self) -> None:
         self.mail_fetch_worker = None
-        self._set_busy(False)
+        if self.worker is None:
+            self._set_busy(False)
 
     def generate_archive_excel(self) -> None:
         if self.current_result is None or not self.current_result.applied:
@@ -1688,6 +1781,7 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _on_completed(self, result: InvoiceOrganizeResult) -> None:
+        mail_fetch_followup = self.mail_fetch_followup_pending
         self.manual_summary_mode = False
         self.current_result = result
         self._fill_date_table(result)
@@ -1695,10 +1789,20 @@ class MainWindow(QMainWindow):
 
         if result.applied:
             self._refresh_summary_artifacts()
-            self.phase_label.setText("当前状态：已完成重命名，可以打印")
-            self.status_bar.showMessage(
-                f"重命名完成：已生成 {result.output_directory}，现在可以直接打印。"
-            )
+            if mail_fetch_followup:
+                combined_pdf = Path(result.output_directory) / "汇总合成.pdf"
+                self.phase_label.setText("当前状态：邮箱发票整理完成，已生成汇总合成 PDF")
+                self.status_bar.showMessage(f"邮箱发票整理完成：{combined_pdf if combined_pdf.exists() else result.output_directory}")
+                QDesktopServices.openUrl(QUrl.fromLocalFile(result.output_directory))
+                if combined_pdf.exists():
+                    QMessageBox.information(self, "邮箱发票整理完成", f"已自动生成汇总合成 PDF：\n{combined_pdf}")
+                else:
+                    QMessageBox.information(self, "邮箱发票整理完成", f"已完成发票分析整理，但没有可合成的 PDF 页面。\n输出目录：{result.output_directory}")
+            else:
+                self.phase_label.setText("当前状态：已完成重命名，可以打印")
+                self.status_bar.showMessage(
+                    f"重命名完成：已生成 {result.output_directory}，现在可以直接打印。"
+                )
         else:
             self.phase_label.setText("当前状态：分析完成")
             self.status_bar.showMessage(
@@ -1709,12 +1813,14 @@ class MainWindow(QMainWindow):
         self._update_manual_summary_controls()
 
     def _on_failed(self, message: str) -> None:
+        self.mail_fetch_followup_pending = False
         QMessageBox.critical(self, "处理失败", message)
         self.phase_label.setText("当前状态：处理失败")
         self.status_bar.showMessage("处理失败。")
 
     def _on_worker_finished(self) -> None:
         self.worker = None
+        self.mail_fetch_followup_pending = False
         self._set_busy(False)
 
     def _set_busy(self, busy: bool) -> None:
@@ -2182,6 +2288,12 @@ class MainWindow(QMainWindow):
         export_combined_print_pdf(self.current_result)
 
 def main() -> int:
+    # Qt's compiled plugin path can lose non-ASCII characters on Windows. Use
+    # Python's Unicode package path so the Windows platform plugin is found.
+    qt_plugins = Path(PyQt5.__file__).resolve().parent / "Qt5" / "plugins"
+    if qt_plugins.is_dir():
+        QCoreApplication.addLibraryPath(str(qt_plugins))
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

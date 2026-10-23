@@ -3,14 +3,14 @@ setlocal
 
 cd /d "%~dp0"
 
-set "PROJECT_PYTHON=C:\Program Files\Python312\python.exe"
+set "PROJECT_PYTHON=%~dp0..\.venv\Scripts\python.exe"
 
 if exist "%PROJECT_PYTHON%" (
     "%PROJECT_PYTHON%" -m invoice_desktop.main
 ) else (
     where py >nul 2>nul
-    if %errorlevel%==0 (
-        py -3.8 -m invoice_desktop.main
+    if not errorlevel 1 (
+        py -3.12 -m invoice_desktop.main
     ) else (
         python -m invoice_desktop.main
     )
@@ -19,9 +19,9 @@ if exist "%PROJECT_PYTHON%" (
 if errorlevel 1 (
     echo.
     echo Launch failed.
-    echo Checked interpreter: %PROJECT_PYTHON%
+    echo Checked project interpreter: %PROJECT_PYTHON%
     echo If needed, install dependencies with:
-    echo pip install -r requirements-python.txt
+    echo "%PROJECT_PYTHON%" -m pip install -r requirements-python.txt
     pause
 )
 

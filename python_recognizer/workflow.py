@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
-import ctypes
-import os
 import re
 import shutil
 import stat
@@ -20,6 +18,7 @@ from reportlab.lib.styles import ParagraphStyle
 from .extractors import extract_text
 from .heuristics import extract_invoice_tax_rate, recognize_invoice_text
 from .pairing import extract_filename_pair_info, iter_source_pdf_files, pair_ride_hailing_documents
+from .trip_summary import build_trip_daily_breakdown
 from .types import InvoiceDateSummary, InvoiceOrganizeRecord, InvoiceOrganizeResult, InvoiceOrganizeSummary
 
 
@@ -188,17 +187,6 @@ def build_output_directory(base_path: Path) -> Path:
 def clear_readonly_attribute(path: Path) -> None:
     """清除文件或目录的只读属性，兼容 Windows DOS 文件属性。"""
     path.chmod(path.stat().st_mode | stat.S_IWRITE)
-    if os.name != "nt":
-        return
-
-    readonly_attribute = 0x00000001
-    invalid_file_attributes = 0xFFFFFFFF
-    attributes = ctypes.windll.kernel32.GetFileAttributesW(str(path))
-    if attributes in {-1, invalid_file_attributes}:
-        raise ctypes.WinError()
-    if attributes & readonly_attribute:
-        if not ctypes.windll.kernel32.SetFileAttributesW(str(path), attributes & ~readonly_attribute):
-            raise ctypes.WinError()
 
 
 def _remove_readonly_and_retry(function, path: str, exception_info) -> None:
@@ -522,13 +510,14 @@ def export_summary_sheet(
         spaceAfter=6,
     )
 
+    daily_breakdown = result.trip_daily_breakdown if result.trip_daily_breakdown is not None else result.summary.daily_breakdown
     manual_values = daily_manual_values or {}
     summary_issues, unassigned_issues = collect_summary_issues(result)
     daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿费", "税金", "在途", "出差补贴", "备注"]]
     subsidy_total = 0.0
     taxi_total = 0.0
     in_transit_total = 0.0
-    for item in result.summary.daily_breakdown:
+    for item in daily_breakdown:
         item_travel_in_transit, item_taxi_amount, item_subsidy_amount = manual_values.get(item.issue_date, ("", 0.0, 0.0))
         taxi_total += item_taxi_amount
         subsidy_total += item_subsidy_amount
@@ -566,7 +555,7 @@ def export_summary_sheet(
     effective_taxi_amount = taxi_amount if taxi_amount else taxi_total
     effective_in_transit_amount = in_transit_total
     daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", ""])
-    subtotal_row_index = len(result.summary.daily_breakdown) + 1
+    subtotal_row_index = len(daily_breakdown) + 1
 
     daily_table_style = _build_table_style()
     daily_table_style.add("FONTSIZE", (0, 0), (-1, -1), 7.2)
@@ -609,7 +598,7 @@ def export_summary_sheet(
             chunk_style.add("FONTSIZE", (1, local_row_index), (1, local_row_index), 8.5)
 
         for row_index in range(start_row_index, min(end_row_index, subtotal_row_index)):
-            item = result.summary.daily_breakdown[row_index - 1]
+            item = daily_breakdown[row_index - 1]
             local_row_index = row_index - start_row_index + 1
             for column_key, column_index in summary_column_indexes.items():
                 if summary_issues.get((item.issue_date, column_key)):
@@ -671,10 +660,13 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
     pair_results = pair_ride_hailing_documents(base_path, enable_ocr=enable_ocr)
     pair_status_lookup = pair_lookup(pair_results)
     records: list[InvoiceOrganizeRecord] = []
+    itinerary_texts: dict[str, str] = {}
 
     for file_path in iter_source_pdf_files(base_path):
         text, text_source, ocr_used = extract_text(file_path, enable_ocr=enable_ocr)
         result = recognize_invoice_text(text, str(file_path))
+        if result.category == "网约车行程单":
+            itinerary_texts[file_path.name] = text
         result.text_source = text_source
         result.ocr_used = ocr_used
         correct_ride_hailing_amount_from_filename(result, file_path.name)
@@ -833,6 +825,7 @@ def organize_invoice_directory(directory: str | Path, *, enable_ocr: bool = Fals
         summary=summary,
         ride_hailing_pairs=pair_results,
         records=records,
+        trip_daily_breakdown=build_trip_daily_breakdown(summary.daily_breakdown, records, pair_results, itinerary_texts),
     )
 
 
