@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -71,8 +72,8 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.15"
-APP_RELEASE_DATE = "2026-10-23"
+APP_VERSION = "1.0.16"
+APP_RELEASE_DATE = "2026-10-24"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
 TRIP_FORM_URL = "https://scloud.syntecclub.com/LoginForm.aspx"
@@ -80,6 +81,7 @@ MAIL_ACCOUNT_SETTING = "mailFetch/account"
 MAIL_AUTH_CODE_SETTING = "mailFetch/authCodeProtected"
 MAIL_OUTPUT_DIRECTORY_SETTING = "mailFetch/outputDirectory"
 HOME_SOURCE_DIRECTORY_SETTING = "workspace/sourceDirectory"
+PRIVATE_CAR_OUTPUT_DIRECTORY_SETTING = "privateCar/outputDirectory"
 AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 REIMBURSEMENT_BLINK_SETTING = "reimbursementReminder/blinkEnabled"
 UI_CONFIG_FILE_NAME = "ui_config.txt"
@@ -90,7 +92,15 @@ SUMMARY_COLLAPSE_TEXT = "收起补贴/出租车/\n地铁/私车公用"
 PRIVATE_CAR_SUMMARY_COLUMN = 11
 VERSION_UPDATES = [
     (
-        "v1.0.15（2026-10-23，当前版本）",
+        "v1.0.16（2026-10-24，当前版本）",
+        [
+            "启动后无需先分析发票，即可填写私车公用行程并单独生成 Excel。",
+            "独立导出前可选择保存文件夹，并记忆上次成功保存的位置；取消选择不会生成文件。",
+            "确认导出改为后台执行，界面保持响应；校验失败或文件被占用时可修正后重试。",
+        ],
+    ),
+    (
+        "v1.0.15（2026-10-23）",
         [
             "新增私车公用行程登记、1.5元/公里补贴计算、同日费用汇总及财务模板Excel导出。",
             "私车补贴和过路费仅同步到日期完全一致的汇总行；过路费以私车表为准，停车费仅导入私车Excel。",
@@ -645,6 +655,52 @@ class PrintWorker(QThread):
         self.completed.emit(printed_jobs, "", "")
 
 
+class ExpenseConfirmWorker(QThread):
+    """只处理主线程采集的快照，不读取或修改任何界面控件。"""
+
+    completed = pyqtSignal(object, str)
+    failed = pyqtSignal(str)
+    status = pyqtSignal(str)
+
+    def __init__(self, *, result, rows, license_plate, source_directory, output_directory,
+                 daily_manual_values, parent=None) -> None:
+        super().__init__(parent)
+        self.result = result
+        self.rows = rows
+        self.license_plate = license_plate
+        self.source_directory = source_directory
+        self.output_directory = output_directory
+        self.daily_manual_values = daily_manual_values
+
+    def run(self) -> None:
+        try:
+            excel_path = ""
+            if self.rows:
+                self.status.emit("正在生成私车公用Excel，请稍候…")
+                excel_path = str(export_private_car_excel(
+                    self.rows,
+                    license_plate=self.license_plate,
+                    source_directory=self.source_directory,
+                    output_directory=self.output_directory,
+                ))
+            if self.result is not None:
+                self.result.private_car_excel = excel_path
+                self.status.emit("正在更新汇总清单及合成PDF，请稍候…")
+                export_summary_sheet(
+                    self.result,
+                    subsidy_amount=round(sum(values[2] for values in self.daily_manual_values.values()), 2),
+                    taxi_amount=round(sum(values[1] for values in self.daily_manual_values.values()), 2),
+                    travel_in_transit="；".join(
+                        f"{date}：{values[0]}" for date, values in self.daily_manual_values.items() if values[0]
+                    ),
+                    daily_manual_values=self.daily_manual_values,
+                )
+                export_combined_print_pdf(self.result)
+            self.completed.emit(self.result, excel_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class PublicDiskUploadDialog(QDialog):
     def __init__(
         self,
@@ -719,6 +775,9 @@ class MainWindow(QMainWindow):
         self.mail_fetch_worker: Optional[MailFetchWorker] = None
         self.mail_fetch_followup_pending = False
         self.print_worker: Optional[PrintWorker] = None
+        self.confirmation_worker: Optional[ExpenseConfirmWorker] = None
+        self.confirmation_in_progress = False
+        self.standalone_private_car_excel = ""
         self.print_progress_dialog: Optional[QProgressDialog] = None
         self.current_print_task_label = "打印任务"
         self.manual_summary_mode = False
@@ -1300,6 +1359,9 @@ class MainWindow(QMainWindow):
         self._run_worker(directory=directory, apply_changes=True, existing_result=None)
 
     def open_output_directory(self) -> None:
+        if self.current_result is None and self.standalone_private_car_excel:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.standalone_private_car_excel).parent)))
+            return
         if self.current_result is None or not self.current_result.applied:
             QMessageBox.warning(self, "输出目录未生成", "请先执行“分析汇总”。")
             return
@@ -1622,27 +1684,99 @@ class MainWindow(QMainWindow):
         self._refresh_date_totals()
 
     def confirm_subsidy_updates(self) -> None:
-        if self.current_result is None or not self.current_result.applied:
+        if self.confirmation_in_progress:
+            return
+        has_result = self.current_result is not None and self.current_result.applied
+        if not has_result and not self.private_car_checkbox.isChecked():
             QMessageBox.warning(self, "缺少结果", "请先执行“分析汇总”，再确认补贴和出租车费用。")
             return
 
-        self._commit_date_table_editor()
+        self.confirmation_in_progress = True
         try:
+            self._commit_date_table_editor()
             # 校验先于任何文件修改，保持填写错误时不生成新产物。
-            if self.private_car_checkbox.isChecked():
-                self.private_car_widget.collect_rows(strict=True)
+            rows = self.private_car_widget.collect_rows(strict=True) if self.private_car_checkbox.isChecked() else []
+            if not has_result and not rows:
+                raise ValueError("请至少填写一条有效的私车行程，再点击确认。无需先分析发票。")
             self._refresh_date_totals()
-            excel_path = self._export_current_private_car_excel() if self.private_car_checkbox.isChecked() else None
-            self._refresh_summary_artifacts()
+            if has_result:
+                result = self._build_manual_summary_result(self._collect_manual_summary_rows()) if self.manual_summary_mode else deepcopy(self.current_result)
+                result.private_car_daily_totals = self._matched_private_car_totals()
+                source_directory, output_directory = result.source_directory, result.output_directory
+            else:
+                # 独立私车导出不伪造发票结果，也不向日期汇总表插入任何行。
+                result = None
+                source_directory = self.manual_summary_source_directory
+                initial_directory = str(self.settings.value(PRIVATE_CAR_OUTPUT_DIRECTORY_SETTING, "") or "").strip() or self.manual_output_directory
+                output_directory = QFileDialog.getExistingDirectory(
+                    self, "选择私车公用Excel保存文件夹", initial_directory,
+                )
+                if not output_directory:
+                    self.confirmation_in_progress = False
+                    self.status_bar.showMessage("已取消私车Excel导出，填写内容已保留。")
+                    return
+            self._sync_date_manual_values()
+            worker = ExpenseConfirmWorker(
+                result=result, rows=rows,
+                license_plate=self.private_car_widget.plate_edit.text(),
+                source_directory=source_directory, output_directory=output_directory,
+                daily_manual_values=deepcopy(self.date_manual_values), parent=self,
+            )
         except ValueError as exc:
+            self.confirmation_in_progress = False
             QMessageBox.warning(self, "私车公用填写有误", str(exc))
             return
         except Exception as exc:
-            QMessageBox.critical(self, "确认或导出失败", f"未能完成全部确认，部分输出可能已更新。请检查输出目录权限，并关闭正在打开的Excel或PDF后重试。\n{exc}")
-            self.status_bar.showMessage("确认未完成，请修正问题后重试。")
+            self.confirmation_in_progress = False
+            self._on_confirmation_failed(str(exc))
             return
+
+        self.confirmation_worker = worker
+        worker.status.connect(self._on_confirmation_status)
+        worker.completed.connect(self._on_confirmation_completed)
+        worker.failed.connect(self._on_confirmation_failed)
+        worker.finished.connect(self._on_confirmation_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._set_busy(True)
+        self.confirm_subsidy_button.setText("正在生成…")
+        self._on_confirmation_status("正在确认费用并生成文件，请稍候…")
+        worker.start()
+
+    def _on_confirmation_status(self, message: str) -> None:
+        self.phase_label.setText(f"当前状态：{message}")
+        self.status_bar.showMessage(message)
+
+    def _on_confirmation_completed(self, result, excel_path: str) -> None:
+        if result is not None:
+            self.current_result = result
+        else:
+            self.standalone_private_car_excel = excel_path
+            # 仅成功生成后记忆；取消选择或导出失败均保留上次成功的位置。
+            self.settings.setValue(PRIVATE_CAR_OUTPUT_DIRECTORY_SETTING, str(Path(excel_path).parent))
+            self.settings.sync()
         self._flash_confirm_subsidy_button()
+        self.phase_label.setText("当前状态：费用确认完成，文件已生成")
         self.status_bar.showMessage(f"已确认费用并更新打印汇总清单；私车Excel：{excel_path}" if excel_path else "已确认补贴和出租车费用，并更新打印汇总清单。")
+        if result is None:
+            self.status_bar.showMessage(f"私车Excel已生成：{excel_path}；可点击“打开输出目录”查看。")
+
+    def _on_confirmation_failed(self, message: str) -> None:
+        self.phase_label.setText("当前状态：费用确认失败，请修正后重试")
+        self.status_bar.showMessage("确认未完成，请修正问题后重试。")
+        QMessageBox.critical(self, "确认或导出失败", f"未能完成全部确认，部分输出可能已更新。请检查输出目录权限，并关闭正在打开的Excel或PDF后重试。\n{message}")
+
+    def _on_confirmation_finished(self) -> None:
+        self.confirmation_worker = None
+        self.confirmation_in_progress = False
+        self.confirm_subsidy_button.setText("确认补贴/出租车")
+        self._set_busy(False)
+
+    def closeEvent(self, event) -> None:
+        if self.confirmation_in_progress:
+            self.status_bar.showMessage("正在生成文件，请等待费用确认完成后再关闭软件。")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _export_current_private_car_excel(self) -> Path | None:
         if self.current_result is None:
@@ -1665,7 +1799,7 @@ class MainWindow(QMainWindow):
         if focus_widget is not None and focus_widget is not self.confirm_subsidy_button:
             focus_widget.clearFocus()
             self.confirm_subsidy_button.setFocus()
-            QApplication.processEvents()
+            # FocusOut同步提交表格编辑器；不泵送事件，避免重复确认重入。
 
     def _flash_confirm_subsidy_button(self) -> None:
         self.confirm_subsidy_button.setProperty("feedback", True)
@@ -1945,19 +2079,20 @@ class MainWindow(QMainWindow):
     def _update_action_buttons(self) -> None:
         has_result = self.current_result is not None
         has_applied_result = has_result and self.current_result.applied
-        is_idle = self.worker is None and self.print_worker is None
+        is_idle = self.worker is None and self.print_worker is None and self.mail_fetch_worker is None and not self.confirmation_in_progress
         self.manual_summary_button.setText("退出手动汇总" if self.manual_summary_mode else "手动填写汇总")
         self.manual_summary_button.setEnabled(is_idle)
         self.printer_button.setEnabled(is_idle)
         self.print_button.setEnabled(is_idle and has_applied_result)
         self.print_summary_button.setEnabled(is_idle and has_applied_result)
-        self.confirm_subsidy_button.setEnabled(is_idle and has_applied_result)
-        self.open_output_button.setEnabled(is_idle and has_applied_result)
+        self.confirm_subsidy_button.setEnabled(is_idle and (has_applied_result or self.private_car_checkbox.isChecked()))
+        self.confirm_subsidy_button.setToolTip("确认费用并生成Excel；未分析发票时可单独导出私车明细。")
+        self.open_output_button.setEnabled(is_idle and (has_applied_result or bool(self.standalone_private_car_excel)))
         self.upload_public_disk_button.setEnabled(is_idle and has_applied_result)
         self.open_archive_button.setEnabled(is_idle)
 
     def _update_manual_summary_controls(self) -> None:
-        is_idle = self.worker is None and self.print_worker is None
+        is_idle = self.worker is None and self.print_worker is None and self.mail_fetch_worker is None and not self.confirmation_in_progress
         self.add_date_row_button.setVisible(self.manual_summary_mode)
         self.remove_date_row_button.setVisible(self.manual_summary_mode)
         self.add_date_row_button.setEnabled(is_idle and self.manual_summary_mode)
@@ -1965,6 +2100,7 @@ class MainWindow(QMainWindow):
 
     def _reset_result_views(self) -> None:
         self.current_result = None
+        self.standalone_private_car_excel = ""
         self.manual_summary_mode = False
         self.date_manual_values = {}
         self.date_table.setRowCount(0)
@@ -2165,12 +2301,16 @@ class MainWindow(QMainWindow):
             self.private_car_widget.clear_rows()
 
     def _on_private_car_changed(self, *args) -> None:
+        self.standalone_private_car_excel = ""
         if self.current_result is not None:
             # 填写变化后旧Excel不再参与打印，必须重新确认才能生成新文件。
             self.current_result.private_car_excel = ""
         self._refresh_date_totals()
         if self.current_result is not None and self.current_result.applied:
             self.status_bar.showMessage("私车费用已按日期更新，请点击“确认补贴/出租车”生成私车Excel并更新汇总清单。")
+        else:
+            self.status_bar.showMessage("可直接确认导出私车Excel，无需先分析发票；点击确认后选择保存文件夹，并记忆上次成功保存的位置。")
+        self._update_action_buttons()
 
     def _matched_private_car_totals(self) -> dict[str, tuple[float, float]]:
         if not self.private_car_checkbox.isChecked():

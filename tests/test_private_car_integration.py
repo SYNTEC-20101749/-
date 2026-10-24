@@ -1,12 +1,15 @@
 from copy import deepcopy
+from contextlib import ExitStack
 from datetime import datetime, time
 from pathlib import Path
 import tempfile
+import time as clock
 import unittest
 from unittest.mock import patch
 
 from openpyxl import load_workbook
 from PyQt5.QtCore import QSettings, Qt
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from reportlab.platypus import Table
 
@@ -133,6 +136,15 @@ class PrivateCarIntegrationTests(unittest.TestCase):
     def date_row(self, date):
         return next(row for row in range(self.window._date_data_row_count()) if self.table.item(row, 0).text() == date)
 
+    def confirm_and_wait(self):
+        self.window.confirm_subsidy_updates()
+        deadline = clock.monotonic() + 10
+        while self.window.confirmation_worker is not None:
+            if clock.monotonic() >= deadline:
+                self.fail("费用确认未在10秒内完成")
+            QTest.qWait(5)
+        self.result = self.window.current_result
+
     def test_live_daily_totals_same_date_addition_and_disable_restore_invoice_tolls(self):
         original = deepcopy(self.result.summary.to_dict())
         self.set_trip()
@@ -179,7 +191,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
         self.car.plate_edit.setText("苏U930FQ")
         with patch("python_recognizer.workflow.Table", wraps=Table) as tables, \
              patch("invoice_desktop.main.QMessageBox.critical") as critical:
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
         critical.assert_not_called()
         output = Path(self.result.output_directory)
         self.assertEqual(len(list(output.glob("新代私车公用费用统计表_2026-10-23_客户甲.xlsx"))), 1)
@@ -238,8 +250,8 @@ class PrivateCarIntegrationTests(unittest.TestCase):
                 }
                 self.assertEqual(self.car.collect_daily_totals(), expected[col])
                 with patch("invoice_desktop.main.QMessageBox.warning") as warning, \
-                     patch.object(self.window, "_refresh_summary_artifacts") as refresh:
-                    self.window.confirm_subsidy_updates()
+                     patch("invoice_desktop.main.export_summary_sheet") as refresh:
+                    self.confirm_and_wait()
                 warning.assert_called_once()
                 refresh.assert_not_called()
                 self.car.table.item(0, col).setText(previous)
@@ -255,8 +267,8 @@ class PrivateCarIntegrationTests(unittest.TestCase):
         self.table.item(1, 4).setText("6")
         self.set_trip()
         with patch("invoice_desktop.main.QMessageBox.critical") as critical:
-            self.window.confirm_subsidy_updates()
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
+            self.confirm_and_wait()
         critical.assert_not_called()
         self.assertEqual(calculate_summary_total(self.window.current_result), 158.5)
         self.assertEqual(self.window.current_result.summary.toll_total, 11)
@@ -269,16 +281,16 @@ class PrivateCarIntegrationTests(unittest.TestCase):
     def test_checked_but_empty_table_does_not_export_private_excel(self):
         self.car.user_edit.setText("默认姓名")
         with patch("invoice_desktop.main.export_private_car_excel") as export:
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
         export.assert_not_called()
 
     def test_excel_failure_does_not_rewrite_pdfs_or_report_success(self):
         self.set_trip()
         with patch("invoice_desktop.main.export_private_car_excel", side_effect=PermissionError("Excel占用")), \
-             patch.object(self.window, "_refresh_summary_artifacts") as refresh, \
+               patch("invoice_desktop.main.export_summary_sheet") as refresh, \
              patch.object(self.window, "_flash_confirm_subsidy_button") as flash, \
              patch("invoice_desktop.main.QMessageBox.critical") as critical:
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
         critical.assert_called_once()
         refresh.assert_not_called()
         flash.assert_not_called()
@@ -322,7 +334,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
 
     def test_one_click_print_includes_current_excel_once_and_summary_only_excludes_it(self):
         self.set_trip()
-        self.window.confirm_subsidy_updates()
+        self.confirm_and_wait()
         self.window.selected_printer_name = "TestPrinter"
         with patch.object(self.window, "_available_printer_names", return_value=["TestPrinter"]), \
              patch("invoice_desktop.main.QMessageBox.question", return_value=QMessageBox.Yes) as question, \
@@ -342,7 +354,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
 
     def test_one_click_print_skips_excel_after_edit_until_confirmed_again(self):
         self.set_trip()
-        self.window.confirm_subsidy_updates()
+        self.confirm_and_wait()
         old_excel = Path(self.window.current_result.private_car_excel)
         previous = old_excel.read_bytes()
         self.car.table.item(0, 6).setText("44166")
@@ -355,7 +367,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
             self.assertTrue(all(path.suffix.lower() == ".pdf" for path in start.call_args.kwargs["queue"]))
             export.assert_not_called()
             self.assertEqual(old_excel.read_bytes(), previous)
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
             export.assert_called_once()
             export.reset_mock()
             start.reset_mock()
@@ -381,7 +393,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
              patch.object(self.car, "collect_rows", side_effect=AssertionError("未勾选不应读取私车明细")), \
              patch("invoice_desktop.main.QMessageBox.warning") as warning, \
              patch("invoice_desktop.main.QMessageBox.critical") as error:
-            self.window.confirm_subsidy_updates()
+            self.confirm_and_wait()
         helper.assert_not_called()
         export.assert_not_called()
         warning.assert_not_called()
@@ -393,7 +405,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
         self.car.user_edit.setText("默认使用者")
         self.set_trip()
         self.set_trip(trip_row("2026-10-25"), row=1)
-        self.window.confirm_subsidy_updates()
+        self.confirm_and_wait()
         old_excel = Path(self.window.current_result.private_car_excel)
         self.assertTrue(old_excel.is_file())
         previous = old_excel.read_bytes()
@@ -428,7 +440,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
 
     def test_one_click_print_skips_deleted_excel_without_blocking_pdfs(self):
         self.set_trip()
-        self.window.confirm_subsidy_updates()
+        self.confirm_and_wait()
         Path(self.window.current_result.private_car_excel).unlink()
         self.window.selected_printer_name = "TestPrinter"
         with patch.object(self.window, "_available_printer_names", return_value=["TestPrinter"]), \
@@ -444,7 +456,7 @@ class PrivateCarIntegrationTests(unittest.TestCase):
 
     def test_plate_edit_invalidates_old_excel_until_reconfirmed(self):
         self.set_trip()
-        self.window.confirm_subsidy_updates()
+        self.confirm_and_wait()
         self.assertTrue(self.window.current_result.private_car_excel)
         self.car.plate_edit.setText("沪A12345")
         self.assertEqual(self.window.current_result.private_car_excel, "")
@@ -474,8 +486,10 @@ class PrivateCarIntegrationTests(unittest.TestCase):
         self.assertTrue(button.shortcut().isEmpty())
         self.assertFalse(button.autoDefault())
         self.assertFalse(button.isDefault())
-        with patch.object(self.window, "_refresh_summary_artifacts") as refresh, \
-             patch("invoice_desktop.main.export_private_car_excel") as export:
+        with ExitStack() as stack:
+            refresh = stack.enter_context(patch("invoice_desktop.main.export_summary_sheet"))
+            stack.enter_context(patch("invoice_desktop.main.export_combined_print_pdf"))
+            export = stack.enter_context(patch("invoice_desktop.main.export_private_car_excel", return_value=self.directory / "private.xlsx"))
             for target in (button, self.car.plate_edit, self.table):
                 target.setFocus()
                 QTest.keyClick(target, Qt.Key_Return)
@@ -490,6 +504,11 @@ class PrivateCarIntegrationTests(unittest.TestCase):
             refresh.assert_not_called()
             export.assert_not_called()
             QTest.mouseClick(button, Qt.LeftButton)
+            deadline = clock.monotonic() + 10
+            while self.window.confirmation_worker is not None:
+                if clock.monotonic() >= deadline:
+                    self.fail("费用确认未在10秒内完成")
+                QTest.qWait(5)
             refresh.assert_called_once()
 
     def test_subsidy_and_toll_sync_independently_of_time_and_parking(self):
