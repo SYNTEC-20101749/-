@@ -7,7 +7,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 
 from python_recognizer.types import InvoiceOrganizeResult
-from python_recognizer.workflow import build_trip_summary_title, calculate_summary_total, collect_summary_issues
+from python_recognizer.workflow import build_trip_summary_title, calculate_summary_total, collect_summary_issues, get_effective_toll_total, get_expense_daily_breakdown
 
 
 ARCHIVE_HEADERS = [
@@ -48,7 +48,7 @@ def get_default_archive_path(source_directory: Optional[str | Path] = None) -> P
 def _get_trip_date_range(result: InvoiceOrganizeResult) -> tuple[str, str]:
     dates = [
         item.issue_date
-        for item in result.summary.daily_breakdown
+        for item in get_expense_daily_breakdown(result)
         if item.issue_date and item.issue_date != "未识别日期"
     ]
     if not dates:
@@ -103,7 +103,8 @@ def append_print_archive(
     target_path = archive_path or get_default_archive_path(result.source_directory)
     if target_path.exists():
         target_path.unlink()
-    workbook, worksheet = _ensure_workbook(target_path, ARCHIVE_HEADERS)
+    headers = ARCHIVE_HEADERS + (["私车公用补贴"] if result.private_car_daily_totals else [])
+    workbook, worksheet = _ensure_workbook(target_path, headers)
     start_date, end_date = _get_trip_date_range(result)
     summary_issues, unassigned_issues = collect_summary_issues(result)
     issue_messages_by_column: dict[str, list[str]] = {}
@@ -124,14 +125,14 @@ def append_print_archive(
             printed_jobs,
             round(result.summary.transport_total, 2),
             round(taxi_amount, 2),
-            round(result.summary.toll_total, 2),
+            get_effective_toll_total(result),
             round(result.summary.lodging_amount_total + result.summary.lodging_public_total, 2),
             round(result.summary.lodging_tax_total, 2),
             round(subsidy_amount + in_transit_amount, 2),
             calculate_summary_total(result, subsidy_amount, taxi_amount, in_transit_amount),
             _get_ride_hailing_interval_notes(result),
             "；".join(dict.fromkeys(issue_messages)),
-        ]
+        ] + ([round(sum(value[0] for value in result.private_car_daily_totals.values()), 2)] if result.private_car_daily_totals else [])
     )
 
     issue_column_mapping = {

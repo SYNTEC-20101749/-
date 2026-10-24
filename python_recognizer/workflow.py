@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import re
@@ -50,6 +51,28 @@ def parse_money_text(value: str) -> float:
         return 0.0
 
 
+def get_effective_toll_total(result: InvoiceOrganizeResult) -> float:
+    original = {item.issue_date: item.toll_total for item in result.summary.daily_breakdown}
+    return round(result.summary.toll_total + sum(
+        toll - original.get(date, 0.0)
+        for date, (_, toll) in result.private_car_daily_totals.items()
+    ), 2)
+
+
+def get_expense_daily_breakdown(result: InvoiceOrganizeResult, *, for_trip: bool = False) -> list[InvoiceDateSummary]:
+    rows = result.trip_daily_breakdown if for_trip and result.trip_daily_breakdown is not None else result.summary.daily_breakdown
+    if not result.private_car_daily_totals:
+        return rows
+    by_date = {item.issue_date: replace(item) for item in rows}
+    for date, (_, toll) in result.private_car_daily_totals.items():
+        if date not in by_date:
+            by_date[date] = InvoiceDateSummary(date, 0, 0, 0, 0, 0, 0, "", 0)
+        item = by_date[date]
+        item.total = round(item.total - item.toll_total + toll, 2)
+        item.toll_total = toll
+    return [by_date[date] for date in sorted(by_date)]
+
+
 def calculate_summary_total(
     result: InvoiceOrganizeResult,
     subsidy_amount: float = 0.0,
@@ -59,10 +82,11 @@ def calculate_summary_total(
     return round(
         result.summary.transport_total
         + taxi_amount
-        + result.summary.toll_total
+        + get_effective_toll_total(result)
         + result.summary.lodging_total
         + subsidy_amount
-        + in_transit_amount,
+        + in_transit_amount
+        + sum(subsidy for subsidy, _ in result.private_car_daily_totals.values()),
         2,
     )
 
@@ -436,7 +460,7 @@ def format_display_date(date_value: str) -> str:
 
 
 def build_trip_summary_title(result: InvoiceOrganizeResult) -> str:
-    dates = [item.issue_date for item in result.summary.daily_breakdown if item.issue_date and item.issue_date != UNKNOWN_DATE_LABEL]
+    dates = [item.issue_date for item in get_expense_daily_breakdown(result) if item.issue_date and item.issue_date != UNKNOWN_DATE_LABEL]
     folder_name = Path(result.source_directory).name or "出差"
 
     if not dates:
@@ -510,8 +534,16 @@ def export_summary_sheet(
         spaceAfter=6,
     )
 
-    daily_breakdown = result.trip_daily_breakdown if result.trip_daily_breakdown is not None else result.summary.daily_breakdown
+    daily_breakdown = get_expense_daily_breakdown(result, for_trip=True)
     manual_values = daily_manual_values or {}
+    # 私车自动新增的日期可能还填写了出租车/补贴；取消私车后仍须保留这些费用。
+    known_dates = {item.issue_date for item in daily_breakdown}
+    extra_dates = [date for date, values in manual_values.items() if date not in known_dates and any(values)]
+    if extra_dates:
+        daily_breakdown = sorted(
+            [*daily_breakdown, *(InvoiceDateSummary(date, 0, 0, 0, 0, 0, 0, "", 0) for date in extra_dates)],
+            key=lambda item: item.issue_date,
+        )
     summary_issues, unassigned_issues = collect_summary_issues(result)
     daily_rows = [["日期", "大众运输", "出租车费用", "过路费", "住宿费", "税金", "在途", "出差补贴", "备注"]]
     subsidy_total = 0.0
@@ -544,7 +576,7 @@ def export_summary_sheet(
             "小计",
             format_money(result.summary.transport_total + taxi_total),
             format_money(taxi_total),
-            format_money(result.summary.toll_total),
+            format_money(get_effective_toll_total(result)),
             format_money(result.summary.lodging_amount_total + result.summary.lodging_public_total),
             format_money(result.summary.lodging_tax_total),
             "",
@@ -555,6 +587,14 @@ def export_summary_sheet(
     effective_taxi_amount = taxi_amount if taxi_amount else taxi_total
     effective_in_transit_amount = in_transit_total
     daily_rows.append(["总计", format_money(calculate_summary_total(result, subsidy_amount, effective_taxi_amount, effective_in_transit_amount)), "", "", "", "", "", "", ""])
+    has_private_car = bool(result.private_car_daily_totals)
+    if has_private_car:
+        daily_rows[0].insert(3, "私车公用补贴")
+        for row, item in zip(daily_rows[1:], daily_breakdown):
+            amount = result.private_car_daily_totals.get(item.issue_date, (0.0, 0.0))[0]
+            row.insert(3, format_money(amount) if amount else "")
+        daily_rows[-2].insert(3, format_money(sum(value[0] for value in result.private_car_daily_totals.values())))
+        daily_rows[-1].insert(3, "")
     subtotal_row_index = len(daily_breakdown) + 1
 
     daily_table_style = _build_table_style()
@@ -571,6 +611,8 @@ def export_summary_sheet(
         "lodging_tax_total": 5,
         "lodging_public_total": 4,
     }
+    if has_private_car:
+        summary_column_indexes = {key: index + (1 if index >= 3 else 0) for key, index in summary_column_indexes.items()}
     if unassigned_issues:
         daily_rows[-2][-1] = f"未归类异常：{len(unassigned_issues)} 项（详见明细列表）"
 
@@ -609,7 +651,7 @@ def export_summary_sheet(
         daily_table_flowables.append(
             Table(
                 chunk_rows,
-                colWidths=[42, 48, 48, 42, 48, 42, 42, 48, 96],
+                colWidths=([42, 44, 44, 48, 38, 44, 36, 36, 44, 90] if has_private_car else [42, 48, 48, 42, 48, 42, 42, 48, 96]),
                 style=chunk_style,
             )
         )

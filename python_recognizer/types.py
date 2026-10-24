@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -135,6 +135,10 @@ class InvoiceOrganizeResult:
     records: list[InvoiceOrganizeRecord]
     # 仅供生成出差清单使用，不替换原始汇总，也不改变既有 JSON 输出。
     trip_daily_breakdown: list[InvoiceDateSummary] | None = None
+    # 私车费用为本次界面填写数据，不覆盖原发票汇总及JSON；值为(补贴, 过路费)。
+    private_car_daily_totals: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # 当前已生成的私车Excel，专供一键打印，不写入原始发票JSON。
+    private_car_excel: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {

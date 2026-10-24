@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import tempfile
 from typing import Callable
 
 import fitz
@@ -10,6 +11,7 @@ from PyQt5.QtGui import QImage, QPainter, QTransform
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 
 from python_recognizer.types import InvoiceOrganizeResult
+from invoice_desktop.spreadsheet_printing import render_excel_to_pdf
 
 
 # 汇总合成文件固定使用横向 A5（210 mm × 148 mm）。
@@ -41,6 +43,12 @@ def build_print_queue(result: InvoiceOrganizeResult) -> list[Path]:
         if not pdf_path.exists():
             continue
         queue.extend([pdf_path] * max(record.print_copies, 0))
+    if result.private_car_excel:
+        excel_path = Path(result.private_car_excel)
+        # 工作簿可能含多个工作表，但整个工作簿仅加入一份，不跟随发票的双份规则。
+        # 未生成或已被移走/删除时跳过，不影响原来的PDF打印。
+        if excel_path.is_file():
+            queue.append(excel_path)
     return queue
 
 
@@ -74,7 +82,8 @@ def _choose_a5_rotation(source_rect: fitz.Rect) -> int:
 
 def export_combined_print_pdf(result: InvoiceOrganizeResult) -> Path | None:
     """按一键打印队列生成 A5 的合成 PDF，并保留每份票据的打印份数。"""
-    queue = build_print_queue(result)
+    # Excel在实际一键打印时才通过Excel排版；不把xlsx交给PDF合并器。
+    queue = [path for path in build_print_queue(result) if path.suffix.lower() == ".pdf"]
     if not queue:
         return None
 
@@ -178,6 +187,29 @@ def print_summary_sheet(
 
 
 def print_pdf_queue(
+    queue: list[Path],
+    progress_callback: Callable[[int, int, Path], None] | None = None,
+    printer_name: str | None = None,
+) -> int:
+    """打印PDF及私车Excel；先完成所有Excel排版，再向打印机提交，避免漏印。"""
+    with tempfile.TemporaryDirectory(prefix="SYNTEC-InvoicePrint-") as directory:
+        prepared = []
+        converted = {}
+        for path in queue:
+            if path.suffix.lower() == ".xlsx":
+                key = path.resolve()
+                if key not in converted:
+                    converted[key] = render_excel_to_pdf(path, Path(directory) / f"private-car-{len(converted)}.pdf")
+                prepared.append(converted[key])
+            else:
+                prepared.append(path)
+        def report(current: int, total: int, path: Path) -> None:
+            if progress_callback is not None:
+                progress_callback(current, total, queue[current - 1])
+        return _print_prepared_pdf_queue(prepared, progress_callback=report, printer_name=printer_name)
+
+
+def _print_prepared_pdf_queue(
     queue: list[Path],
     progress_callback: Callable[[int, int, Path], None] | None = None,
     printer_name: str | None = None,

@@ -16,7 +16,7 @@ if __package__ in {None, ""}:
 
 import PyQt5
 from PyQt5.QtCore import QCoreApplication, QDate, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QDesktopServices, QKeySequence
+from PyQt5.QtGui import QBrush, QColor, QDesktopServices
 from PyQt5.QtPrintSupport import QPrinter, QPrinterInfo
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -52,6 +52,9 @@ from PyQt5.QtWidgets import (
 from invoice_desktop.archive import append_print_archive, get_default_archive_path
 from invoice_desktop.mail_fetcher import fetch_qq_invoice_attachments
 from invoice_desktop.printing import build_print_queue, build_summary_sheet_queue, export_combined_print_pdf, print_pdf_queue
+from invoice_desktop.private_car import PrivateCarWidget
+from invoice_desktop.private_car_export import export_private_car_excel
+from invoice_desktop.release_updates import RELEASES_URL, ReleaseUpdateCheck
 from invoice_desktop.secrets_store import protect_secret, unprotect_secret
 from python_recognizer.types import InvoiceDateSummary, InvoiceOrganizeResult, InvoiceOrganizeSummary
 from python_recognizer.workflow import (
@@ -68,7 +71,7 @@ WARNING_TEXT_COLOR = QColor("#C62828")
 NORMAL_ROW_COLOR = QColor("#FFFFFF")
 SUBTOTAL_ROW_COLOR = QColor("#E8F5E9")
 SUBSIDY_HEADER_COLOR = QColor("#2F6F98")
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.15"
 APP_RELEASE_DATE = "2026-10-23"
 DEFAULT_PUBLIC_DISK_ADDRESS = r"\\18.18.1.2"
 PUBLIC_DISK_UPLOAD_DIRECTORY_SETTING = "publicDisk/uploadDirectory"
@@ -81,9 +84,22 @@ AUTO_START_VALUE_NAME = "SYNTEC-InvoiceManager"
 REIMBURSEMENT_BLINK_SETTING = "reimbursementReminder/blinkEnabled"
 UI_CONFIG_FILE_NAME = "ui_config.txt"
 MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME = "show_mail_fetch_button"
+SUMMARY_ENTRY_TEXT = "填写补贴/出租车/\n地铁/私车公用"
+SUMMARY_COLLAPSE_TEXT = "收起补贴/出租车/\n地铁/私车公用"
+# 保持原有费用列的逻辑索引，将新增列在视觉上移动到出租车费用之后。
+PRIVATE_CAR_SUMMARY_COLUMN = 11
 VERSION_UPDATES = [
     (
-        "v1.0.14（2026-10-23，当前版本）",
+        "v1.0.15（2026-10-23，当前版本）",
+        [
+            "新增私车公用行程登记、1.5元/公里补贴计算、同日费用汇总及财务模板Excel导出。",
+            "私车补贴和过路费仅同步到日期完全一致的汇总行；过路费以私车表为准，停车费仅导入私车Excel。",
+            "私车表格与按日期汇总表统一字号；确认按钮不再由Enter/回车触发，软件启动时默认最大化。",
+            "版本信息页异步检查GitHub最新正式版本；兼容Python 3.12 HTTPS环境，显示更新提示及下载页面入口。",
+        ],
+    ),
+    (
+        "v1.0.14（2026-10-23）",
         [
             "出差清单中的网约车费用按配对行程单的逐笔日期与金额拆分，同一天的多笔行程自动累加。",
             "高铁等其他大众运输费用沿用原累加规则，发票明细、重命名及 Excel 归档保持不变。",
@@ -615,6 +631,8 @@ class PrintWorker(QThread):
 
     def run(self) -> None:
         try:
+            if any(path.suffix.lower() == ".xlsx" for path in self.queue):
+                self.status.emit("正在使用Excel生成私车公用A5打印页面，请稍候...")
             printed_jobs = print_pdf_queue(
                 self.queue,
                 progress_callback=self._emit_progress,
@@ -1034,8 +1052,13 @@ class MainWindow(QMainWindow):
         self.print_summary_button.setProperty("role", "accent")
         self.print_summary_button.clicked.connect(self.print_summary_sheet_only)
 
-        self.toggle_date_summary_button = QPushButton("填写补贴/出租车")
+        self.toggle_date_summary_button = QPushButton("填写补贴/出租车", self)
         self.toggle_date_summary_button.setProperty("role", "primary")
+        self.toggle_date_summary_button.ensurePolished()
+        original_button_size = self.toggle_date_summary_button.sizeHint()
+        self.toggle_date_summary_button.setStyleSheet("font-size: 12px; padding: 4px 8px;")
+        self.toggle_date_summary_button.setFixedSize(original_button_size)
+        self.toggle_date_summary_button.setText(SUMMARY_ENTRY_TEXT)
         self.toggle_date_summary_button.clicked.connect(self.toggle_date_summary)
 
         self.open_output_button = QPushButton("打开输出目录")
@@ -1053,10 +1076,6 @@ class MainWindow(QMainWindow):
         self.trip_form_button = QPushButton("✈  出差单填写")
         self.trip_form_button.setProperty("role", "tripForm")
         self.trip_form_button.clicked.connect(self.open_trip_form)
-
-        self.qq_mail_button = QPushButton("✉  打开QQ邮箱")
-        self.qq_mail_button.setProperty("role", "qqMail")
-        self.qq_mail_button.clicked.connect(self.open_qq_mail)
 
         show_mail_fetch_button = _read_bool_config_value(
             MAIL_FETCH_BUTTON_VISIBILITY_CONFIG_NAME,
@@ -1083,7 +1102,6 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.print_summary_button)
         button_row.addStretch(1)
         button_row.addWidget(self.trip_form_button)
-        button_row.addWidget(self.qq_mail_button)
         button_row.addWidget(self.mail_fetch_button)
 
         layout.addLayout(button_row)
@@ -1146,20 +1164,32 @@ class MainWindow(QMainWindow):
         group = QGroupBox("按日期汇总")
         layout = QVBoxLayout(group)
 
-        self.date_table = QTableWidget(0, 11)
+        self.date_table = QTableWidget(0, 12)
         self.date_table.setHorizontalHeaderLabels(
-            ["日期", "假别", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴"]
+            ["日期", "假别", "大众运输", "出租车费用", "过路费", "住宿不含税", "住宿税额", "住宿（普票全额）", "住宿合计", "在途", "出差补贴", "私车公用补贴"]
         )
+        self.date_table.horizontalHeader().moveSection(PRIVATE_CAR_SUMMARY_COLUMN, 4)
         self.date_table.horizontalHeaderItem(10).setForeground(QBrush(SUBSIDY_HEADER_COLOR))
         self.date_table.setEditTriggers(QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed)
         self.date_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.date_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.date_table.verticalHeader().setVisible(False)
-        self.date_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.date_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.date_table.horizontalHeader().setMinimumSectionSize(120)
+        self.date_table.horizontalHeader().setStretchLastSection(True)
         self.date_table.setMinimumHeight(120)
         self.date_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.date_table.cellChanged.connect(self._on_date_table_cell_changed)
         layout.addWidget(self.date_table)
+
+        self.private_car_checkbox = QCheckBox("私车公用")
+        layout.addWidget(self.private_car_checkbox)
+        self.private_car_widget = PrivateCarWidget(self.settings, group)
+        self.private_car_widget.hide()
+        self.private_car_checkbox.toggled.connect(self.private_car_widget.setVisible)
+        self.private_car_checkbox.toggled.connect(self._on_private_car_toggled)
+        self.private_car_widget.expenses_changed.connect(self._on_private_car_changed)
+        layout.addWidget(self.private_car_widget)
 
         confirm_row = QHBoxLayout()
         self.add_date_row_button = QPushButton("新增日期行")
@@ -1171,10 +1201,10 @@ class MainWindow(QMainWindow):
         confirm_row.addWidget(self.add_date_row_button)
         confirm_row.addWidget(self.remove_date_row_button)
         confirm_row.addStretch(1)
-        self.confirm_subsidy_button = QPushButton("确认补贴/出租车 (Enter/回车)")
+        self.confirm_subsidy_button = QPushButton("确认补贴/出租车")
         self.confirm_subsidy_button.setProperty("role", "accent")
-        self.confirm_subsidy_button.setShortcut(QKeySequence(Qt.Key_Return))
-        self.confirm_subsidy_button.setAutoDefault(True)
+        self.confirm_subsidy_button.setAutoDefault(False)
+        self.confirm_subsidy_button.setDefault(False)
         self.confirm_subsidy_button.clicked.connect(self.confirm_subsidy_updates)
         confirm_row.addWidget(self.confirm_subsidy_button)
         layout.addLayout(confirm_row)
@@ -1279,10 +1309,6 @@ class MainWindow(QMainWindow):
     def open_trip_form(self) -> None:
         if not QDesktopServices.openUrl(QUrl(TRIP_FORM_URL)):
             QMessageBox.warning(self, "无法打开出差单", f"无法打开出差单填写入口：\n{TRIP_FORM_URL}")
-
-    def open_qq_mail(self) -> None:
-        if not QDesktopServices.openUrl(QUrl("https://mail.qq.com/")):
-            QMessageBox.warning(self, "无法打开 QQ 邮箱", "无法打开 QQ 邮箱网页登录页。")
 
     def fetch_mail_invoices(self) -> None:
         dialog = MailInvoiceFetchDialog(self.settings, self)
@@ -1456,7 +1482,36 @@ class MainWindow(QMainWindow):
 
         current_version = QLabel(f"当前版本：v{APP_VERSION}（{APP_RELEASE_DATE}）")
         current_version.setStyleSheet("color: #B86B35; font-size: 22px; font-weight: 700;")
-        root_layout.addWidget(current_version)
+        version_row = QHBoxLayout()
+        version_row.addWidget(current_version)
+        update_label = QLabel("正在检查更新…")
+        update_label.setObjectName("releaseUpdateLabel")
+        update_label.setStyleSheet("color: #666666; font-size: 16px;")
+        update_label.setWordWrap(True)
+        version_row.addWidget(update_label, 1)
+        download_button = QPushButton("下载页面")
+        download_button.setObjectName("releaseDownloadButton")
+        download_button.setStyleSheet("font-size: 16px; padding: 6px 10px;")
+        download_button.setAutoDefault(False)
+        download_button.hide()
+        download_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)))
+        version_row.addWidget(download_button)
+        root_layout.addLayout(version_row)
+        checker = ReleaseUpdateCheck(APP_VERSION, dialog)
+        def on_release_checked(tag: str) -> None:
+            update_label.setText(f"有新版本 {tag}" if tag else "当前已是最新版本")
+            update_label.setStyleSheet("color: #C62828; font-size: 16px; font-weight: 700;" if tag else "color: #666666; font-size: 16px;")
+            download_button.setVisible(bool(tag))
+
+        def on_release_failed(message: str) -> None:
+            update_label.setText(message)
+            update_label.setToolTip(message)
+            download_button.show()
+
+        checker.checked.connect(on_release_checked)
+        checker.failed.connect(on_release_failed)
+        dialog.finished.connect(checker.cancel)
+        QTimer.singleShot(0, checker.start)
 
         description = QLabel("版本更新信息")
         description.setStyleSheet("color: #17324D; font-size: 18px; font-weight: 700;")
@@ -1490,11 +1545,13 @@ class MainWindow(QMainWindow):
         close_button.clicked.connect(dialog.accept)
         root_layout.addWidget(close_button, 0, Qt.AlignRight)
         dialog.exec_()
+        checker.cancel()
+        dialog.deleteLater()
 
     def toggle_date_summary(self) -> None:
         should_show = not self.date_summary_group.isVisible()
         self.date_summary_group.setVisible(should_show)
-        self.toggle_date_summary_button.setText("收起补贴/出租车填写" if should_show else "填写补贴/出租车")
+        self.toggle_date_summary_button.setText(SUMMARY_COLLAPSE_TEXT if should_show else SUMMARY_ENTRY_TEXT)
         if should_show:
             self._focus_first_manual_cell()
 
@@ -1522,7 +1579,7 @@ class MainWindow(QMainWindow):
         self.current_result = self._build_manual_summary_result([])
         self.table.setRowCount(0)
         self.date_summary_group.show()
-        self.toggle_date_summary_button.setText("收起补贴/出租车填写")
+        self.toggle_date_summary_button.setText(SUMMARY_COLLAPSE_TEXT)
         self._fill_manual_date_table()
         self._refresh_summary_artifacts()
         self.phase_label.setText("当前状态：手动汇总模式")
@@ -1541,7 +1598,7 @@ class MainWindow(QMainWindow):
         insert_row = self._date_data_row_count()
         self.date_table.insertRow(insert_row)
         for column_index, value in enumerate(self._build_empty_manual_row_values()):
-            self.date_table.setItem(insert_row, column_index, self._build_date_table_item(value, editable=True))
+            self.date_table.setItem(insert_row, column_index, self._build_date_table_item(value, editable=self._is_date_table_column_editable(column_index)))
         self.updating_date_table = False
         self._refresh_date_totals()
         self.date_table.setCurrentCell(insert_row, 0)
@@ -1570,10 +1627,38 @@ class MainWindow(QMainWindow):
             return
 
         self._commit_date_table_editor()
-        self._refresh_date_totals()
-        self._refresh_summary_artifacts()
+        try:
+            # 校验先于任何文件修改，保持填写错误时不生成新产物。
+            if self.private_car_checkbox.isChecked():
+                self.private_car_widget.collect_rows(strict=True)
+            self._refresh_date_totals()
+            excel_path = self._export_current_private_car_excel() if self.private_car_checkbox.isChecked() else None
+            self._refresh_summary_artifacts()
+        except ValueError as exc:
+            QMessageBox.warning(self, "私车公用填写有误", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "确认或导出失败", f"未能完成全部确认，部分输出可能已更新。请检查输出目录权限，并关闭正在打开的Excel或PDF后重试。\n{exc}")
+            self.status_bar.showMessage("确认未完成，请修正问题后重试。")
+            return
         self._flash_confirm_subsidy_button()
-        self.status_bar.showMessage("已确认补贴和出租车费用，并更新打印汇总清单。")
+        self.status_bar.showMessage(f"已确认费用并更新打印汇总清单；私车Excel：{excel_path}" if excel_path else "已确认补贴和出租车费用，并更新打印汇总清单。")
+
+    def _export_current_private_car_excel(self) -> Path | None:
+        if self.current_result is None:
+            return None
+        rows = self.private_car_widget.collect_rows(strict=True) if self.private_car_checkbox.isChecked() else []
+        if not rows:
+            self.current_result.private_car_excel = ""
+            return None
+        path = export_private_car_excel(
+            rows,
+            license_plate=self.private_car_widget.plate_edit.text(),
+            source_directory=self.current_result.source_directory,
+            output_directory=self.current_result.output_directory,
+        )
+        self.current_result.private_car_excel = str(path)
+        return path
 
     def _commit_date_table_editor(self) -> None:
         focus_widget = QApplication.focusWidget()
@@ -1610,7 +1695,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "未生成整理文件", "请先执行“分析汇总”，生成整理后的 PDF，再进行打印。")
             return
 
-        self._refresh_summary_artifacts()
+        try:
+            self._commit_date_table_editor()
+            self._refresh_date_totals()
+            # 打印不生成Excel，只使用已确认且仍存在的文件。
+            if not self.private_car_checkbox.isChecked():
+                self.current_result.private_car_excel = ""
+            self._refresh_summary_artifacts()
+        except Exception as exc:
+            QMessageBox.critical(self, "打印准备失败", f"未发送任何打印任务。请检查私车填写内容及输出文件是否被占用。\n{exc}")
+            return
 
         available_printer_names = self._available_printer_names()
         if not self.selected_printer_name or self.selected_printer_name not in available_printer_names:
@@ -1641,7 +1735,9 @@ class MainWindow(QMainWindow):
                 f"打印内容：{task_label}\n"
                 f"纸张：A5\n"
                 f"打印文件数：{unique_files}\n"
-                f"打印总份数：{len(queue)}\n\n"
+                f"打印总份数：{len(queue)}\n"
+                + ("包含私车公用Excel：1份（A5横向，全部工作表）\n" if any(path.suffix.lower() == ".xlsx" for path in queue) else "")
+                + "\n"
                 "是否继续打印？"
             ),
             QMessageBox.Yes | QMessageBox.No,
@@ -1838,9 +1934,10 @@ class MainWindow(QMainWindow):
         self.upload_public_disk_button.setEnabled(not busy)
         self.open_archive_button.setEnabled(not busy)
         self.trip_form_button.setEnabled(not busy)
-        self.qq_mail_button.setEnabled(not busy)
         self.mail_fetch_button.setEnabled(not busy)
         self.date_table.setEnabled(not busy)
+        self.private_car_checkbox.setEnabled(not busy)
+        self.private_car_widget.setEnabled(not busy)
         if not busy:
             self._update_action_buttons()
             self._update_manual_summary_controls()
@@ -1873,7 +1970,7 @@ class MainWindow(QMainWindow):
         self.date_table.setRowCount(0)
         self.table.setRowCount(0)
         self.date_summary_group.hide()
-        self.toggle_date_summary_button.setText("填写补贴/出租车")
+        self.toggle_date_summary_button.setText(SUMMARY_ENTRY_TEXT)
         self.phase_label.setText("当前状态：等待分析")
         self._update_manual_summary_controls()
 
@@ -1904,6 +2001,7 @@ class MainWindow(QMainWindow):
                 f"{item.lodging_total:.2f}",
                 travel_in_transit,
                 f"{subsidy_amount:.2f}" if subsidy_amount else "",
+                "",
             ]
             for column_index, value in enumerate(values):
                 cell_item = self._build_date_table_item(value, editable=self._is_date_table_column_editable(column_index))
@@ -1926,7 +2024,7 @@ class MainWindow(QMainWindow):
         self.updating_date_table = True
         self.date_table.setRowCount(3)
         for column_index, value in enumerate(self._build_empty_manual_row_values()):
-            self.date_table.setItem(0, column_index, self._build_date_table_item(value, editable=True))
+            self.date_table.setItem(0, column_index, self._build_date_table_item(value, editable=self._is_date_table_column_editable(column_index)))
         for row_index in range(1, 3):
             for column_index in range(self.date_table.columnCount()):
                 self.date_table.setItem(row_index, column_index, self._build_date_table_item("", editable=False, summary=True))
@@ -1935,7 +2033,7 @@ class MainWindow(QMainWindow):
 
     def _build_empty_manual_row_values(self) -> list[str]:
         current_date = datetime.now().strftime("%Y-%m-%d")
-        return [current_date, self._get_day_type(current_date), "", "", "", "", "", "", "", "", ""]
+        return [current_date, self._get_day_type(current_date), "", "", "", "", "", "", "", "", "", ""]
 
     def _focus_first_manual_cell(self) -> None:
         if self._date_data_row_count() == 0:
@@ -1957,6 +2055,8 @@ class MainWindow(QMainWindow):
         return item
 
     def _is_date_table_column_editable(self, column_index: int) -> bool:
+        if column_index == PRIVATE_CAR_SUMMARY_COLUMN:
+            return False
         if self.manual_summary_mode:
             return column_index in {0, 2, 3, 4, 5, 6, 7, 8, 9, 10}
         return column_index in {3, 9, 10}
@@ -2001,6 +2101,7 @@ class MainWindow(QMainWindow):
             return
 
         self.updating_date_table = True
+        self._apply_private_car_totals()
         self._sync_date_manual_values()
 
         data_row_count = self._date_data_row_count()
@@ -2025,6 +2126,8 @@ class MainWindow(QMainWindow):
         transport_subtotal = round(money_totals[0] + money_totals[1], 2)
         combined_subsidy_total = round(in_transit_total + money_totals[7], 2)
         grand_total = round(transport_subtotal + money_totals[2] + money_totals[6] + combined_subsidy_total, 2)
+        private_subsidy_total = round(sum(self._parse_date_table_money(row, PRIVATE_CAR_SUMMARY_COLUMN) for row in range(data_row_count)), 2)
+        grand_total = round(grand_total + private_subsidy_total, 2)
 
         subtotal_values = [
             "小计",
@@ -2038,8 +2141,9 @@ class MainWindow(QMainWindow):
             f"{money_totals[6]:.2f}",
             "",
             f"{combined_subsidy_total:.2f}",
+            f"{private_subsidy_total:.2f}",
         ]
-        total_values = ["总计", "", f"{grand_total:.2f}", "", "", "", "", "", "", "", ""]
+        total_values = ["总计", "", f"{grand_total:.2f}", "", "", "", "", "", "", "", "", ""]
 
         for column_index, value in enumerate(subtotal_values):
             self.date_table.setItem(subtotal_row, column_index, self._build_date_table_item(value, editable=False, summary=True))
@@ -2052,6 +2156,58 @@ class MainWindow(QMainWindow):
         self.date_table.resizeRowsToContents()
 
         self.updating_date_table = False
+
+    def _on_private_car_toggled(self, checked: bool) -> None:
+        if checked:
+            self._on_private_car_changed()
+        else:
+            # clear_rows会发送一次费用变化通知，同步清理总计及旧Excel打印引用。
+            self.private_car_widget.clear_rows()
+
+    def _on_private_car_changed(self, *args) -> None:
+        if self.current_result is not None:
+            # 填写变化后旧Excel不再参与打印，必须重新确认才能生成新文件。
+            self.current_result.private_car_excel = ""
+        self._refresh_date_totals()
+        if self.current_result is not None and self.current_result.applied:
+            self.status_bar.showMessage("私车费用已按日期更新，请点击“确认补贴/出租车”生成私车Excel并更新汇总清单。")
+
+    def _matched_private_car_totals(self) -> dict[str, tuple[float, float]]:
+        if not self.private_car_checkbox.isChecked():
+            return {}
+        totals = self.private_car_widget.collect_daily_totals()
+        existing_dates = {self.date_table.item(row, 0).text().strip() for row in range(self._date_data_row_count())}
+        return {date: amounts for date, amounts in totals.items() if date in existing_dates}
+
+    def _apply_private_car_totals(self) -> None:
+        # 只更新汇总表中日期完全对应的行，不按行号匹配，也不自动新增日期。
+        totals = self._matched_private_car_totals()
+        seen = set()
+        for row in range(self._date_data_row_count()):
+            date = self.date_table.item(row, 0).text().strip()
+            toll_item = self.date_table.item(row, 4)
+            if date in totals:
+                if toll_item.data(Qt.UserRole) is None:
+                    toll_item.setData(Qt.UserRole, toll_item.text())
+                # 手动模式允许同一日期多行，但自动私车费用只计一次。
+                subsidy, toll = totals[date] if date not in seen else (0.0, 0.0)
+                toll_item.setText(f"{toll:.2f}")
+                toll_item.setFlags(toll_item.flags() & ~Qt.ItemIsEditable)
+                toll_item.setToolTip("自动取自私车公用表，不与该日通行费发票叠加。取消私车公用可恢复原值。")
+                value = f"{subsidy:.2f}"
+            else:
+                original = toll_item.data(Qt.UserRole)
+                if original is not None:
+                    toll_item.setText(original)
+                    toll_item.setData(Qt.UserRole, None)
+                    toll_item.setToolTip("")
+                    if self.manual_summary_mode:
+                        toll_item.setFlags(toll_item.flags() | Qt.ItemIsEditable)
+                value = ""
+            self.date_table.setItem(row, PRIVATE_CAR_SUMMARY_COLUMN, self._build_date_table_item(value, editable=False))
+            seen.add(date)
+        if self.current_result is not None:
+            self.current_result.private_car_daily_totals = totals
 
     def _on_date_table_cell_changed(self, row_index: int, column_index: int) -> None:
         if self.updating_date_table or row_index >= self._date_data_row_count():
@@ -2201,7 +2357,7 @@ class MainWindow(QMainWindow):
                     "issue_date": text_values[0],
                     "transport_total": self._parse_date_table_money(row_index, 2),
                     "taxi_amount": self._parse_date_table_money(row_index, 3),
-                    "toll_total": self._parse_date_table_money(row_index, 4),
+                    "toll_total": parse_money_text(str(self.date_table.item(row_index, 4).data(Qt.UserRole))) if self.date_table.item(row_index, 4).data(Qt.UserRole) is not None else self._parse_date_table_money(row_index, 4),
                     "lodging_amount_total": self._parse_date_table_money(row_index, 5),
                     "lodging_tax_total": self._parse_date_table_money(row_index, 6),
                     "lodging_public_total": self._parse_date_table_money(row_index, 7),
@@ -2273,10 +2429,13 @@ class MainWindow(QMainWindow):
     def _refresh_summary_artifacts(self) -> None:
         if self.manual_summary_mode:
             manual_rows = self._collect_manual_summary_rows()
+            private_car_excel = self.current_result.private_car_excel if self.current_result is not None else ""
             self.current_result = self._build_manual_summary_result(manual_rows)
+            self.current_result.private_car_excel = private_car_excel
 
         if self.current_result is None or not self.current_result.applied:
             return
+        self.current_result.private_car_daily_totals = self._matched_private_car_totals()
         self._sync_date_manual_values()
         export_summary_sheet(
             self.current_result,
@@ -2296,7 +2455,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     return app.exec_()
 
 
